@@ -33,6 +33,7 @@ bool debuglog = false;
 
 enum pipe_cmd_t {
 	PIPECMD_EXIT_DAEMON = 1,
+	PIPECMD_EXPOSE_ALL_MONITORS = 2,
 	PIPECMD_SWITCH = 4,
 	PIPECMD_EXPOSE = 8,
 	PIPECMD_PAGING = 16,
@@ -699,6 +700,8 @@ activate_via_fifo(session_t *ps, const char *pipePath) {
 		master_command |= PIPECMD_SWITCH;
 	if (ps->o.mode == PROGMODE_EXPOSE)
 		master_command |= PIPECMD_EXPOSE;
+	if (ps->o.mode == PROGMODE_EXPOSE_ALL_MONITORS)
+		master_command |= PIPECMD_EXPOSE_ALL_MONITORS;
 	if (ps->o.mode == PROGMODE_PAGING)
 		master_command |= PIPECMD_PAGING;
 
@@ -1056,6 +1059,115 @@ init_layout(MainWin *mw, enum layoutmode layout, Window leader)
 	init_focus(mw, layout, leader);
 }
 
+#ifdef CFG_XINERAMA
+struct mon_layout {
+	dlist *windows;
+	unsigned int w, h;
+};
+#endif
+
+static void
+init_layout_all_monitors(MainWin *mw, enum layoutmode layout, Window leader)
+{
+	session_t *ps = mw->ps;
+
+#ifdef CFG_XINERAMA
+	if (!mw->xin_info || mw->xin_screens <= 0) {
+		init_layout(mw, layout, leader);
+		return;
+	}
+
+	struct mon_layout *mons = allocchk(
+			calloc(mw->xin_screens, sizeof(struct mon_layout)));
+
+	XineramaScreenInfo *saved_active = mw->xin_active;
+	long desktop = wm_get_current_desktop(ps);
+
+	// Pass 1: layout each monitor's windows in its own logical pixel space
+	// and accumulate the smallest per-monitor fit factor as a single global
+	// multiplier, so every monitor's layout fits within its own bounds.
+	float M = 1.0f;
+	bool have_any = false;
+	for (int i = 0; i < mw->xin_screens; i++) {
+		mw->xin_active = &mw->xin_info[i];
+		mons[i].windows = dlist_first(dlist_find_all(
+				mw->clients,
+				(dlist_match_func) clientwin_filter_func,
+				&desktop));
+		if (!mons[i].windows)
+			continue;
+
+		unsigned int tw = 100, th = 100;
+		layout_run(mw, mons[i].windows, &tw, &th, layout);
+		mons[i].w = tw;
+		mons[i].h = th;
+
+		XineramaScreenInfo *s = &mw->xin_info[i];
+		int avail_w = MAX(s->width  - 2 * mw->distance, 1);
+		int avail_h = MAX(s->height - 2 * mw->distance, 1);
+		float sx = (float)avail_w / (float)MAX(tw, 1);
+		float sy = (float)avail_h / (float)MAX(th, 1);
+		float scale = MIN(sx, sy);
+		if (!have_any || scale < M) {
+			M = scale;
+			have_any = true;
+		}
+	}
+	if (!ps->o.allowUpscale)
+		M = MIN(M, 1.0f);
+	if (M <= 0.0f)
+		M = 1.0f;
+
+	// Pass 2: translate each monitor's local (cw->x, cw->y) into
+	// pre-multiplier coordinates such that cw->x * M == target screen pixel.
+	// With mw spanning the full root and mw->xoff = mw->yoff = 0, that's the
+	// final miniature position.
+	for (int i = 0; i < mw->xin_screens; i++) {
+		if (!mons[i].windows)
+			continue;
+		XineramaScreenInfo *s = &mw->xin_info[i];
+
+		float scaled_w = (float)mons[i].w * M;
+		float scaled_h = (float)mons[i].h * M;
+		float origin_x = (float)s->x_org + ((float)s->width  - scaled_w) / 2.0f;
+		float origin_y = (float)s->y_org + ((float)s->height - scaled_h) / 2.0f;
+		int off_x = (int)roundf(origin_x / M);
+		int off_y = (int)roundf(origin_y / M);
+
+		foreach_dlist (mons[i].windows) {
+			ClientWin *cw = iter->data;
+			cw->x += off_x;
+			cw->y += off_y;
+		}
+
+		dlist_free(mons[i].windows);
+	}
+
+	free(mons);
+
+	if (mw->clientondesktop) {
+		dlist_free(mw->clientondesktop);
+		mw->clientondesktop = NULL;
+	}
+	mw->xin_active = NULL;
+	mw->clientondesktop = dlist_first(dlist_find_all(
+			mw->clients,
+			(dlist_match_func) clientwin_filter_func,
+			&desktop));
+	mw->xin_active = saved_active;
+
+	// Bypass init_multiplier: we've already handled sizing per-monitor
+	// and don't want it to recompute a single-rect fit against the union.
+	mw->multiplier = M;
+	mw->xoff = 0;
+	mw->yoff = 0;
+
+	init_focus(mw, layout, leader);
+#else
+	init_layout(mw, layout, leader);
+#endif
+}
+
 static void
 init_paging_layout(MainWin *mw, enum layoutmode layout, Window leader)
 {
@@ -1285,6 +1397,8 @@ skippy_activate(MainWin *mw, enum layoutmode layout, Window leader)
 
 	if (layout == LAYOUTMODE_PAGING)
 		init_paging_layout(mw, layout, leader);
+	else if (mw->ps->o.mode == PROGMODE_EXPOSE_ALL_MONITORS)
+		init_layout_all_monitors(mw, layout, leader);
 	else
 		init_layout(mw, layout, leader);
 
@@ -1324,6 +1438,9 @@ mainloop(session_t *ps, bool activate_on_start) {
 		case PROGMODE_SWITCH:
 			layout = LAYOUTMODE_SWITCH;
 		case PROGMODE_EXPOSE:
+			layout = LAYOUTMODE_EXPOSE;
+			break;
+		case PROGMODE_EXPOSE_ALL_MONITORS:
 			layout = LAYOUTMODE_EXPOSE;
 			break;
 		case PROGMODE_PAGING:
@@ -1987,6 +2104,10 @@ mainloop(session_t *ps, bool activate_on_start) {
 						ps->o.mode = PROGMODE_EXPOSE;
 						layout = LAYOUTMODE_EXPOSE;
 					}
+					else if (piped_input & PIPECMD_EXPOSE_ALL_MONITORS) {
+						ps->o.mode = PROGMODE_EXPOSE_ALL_MONITORS;
+						layout = LAYOUTMODE_EXPOSE;
+					}
 					else if (piped_input & PIPECMD_PAGING) {
 						ps->o.mode = PROGMODE_PAGING;
 						layout = LAYOUTMODE_PAGING;
@@ -2234,6 +2355,7 @@ show_help() {
 			"\n"
 			"  --switch            - connect to daemon and activate switch.\n"
 			"  --expose            - connect to daemon and activate expose.\n"
+			"  --expose-all-monitors - connect to daemon and activate expose on every monitor simultaneously.\n"
 			"  --paging            - connect to daemon and activate paging.\n"
 			"\n"
 			"  --multi-select      - select multiple windows and return all IDs.\n"
@@ -2381,6 +2503,7 @@ parse_args(session_t *ps, int argc, char **argv, bool first_pass) {
 		OPT_DEBUGLOG,
 		OPT_ACTV_SWITCH,
 		OPT_ACTV_EXPOSE,
+		OPT_ACTV_EXPOSE_ALL_MONITORS,
 		OPT_ACTV_PAGING,
 		OPT_DM_START,
 		OPT_DM_STOP,
@@ -2402,6 +2525,7 @@ parse_args(session_t *ps, int argc, char **argv, bool first_pass) {
 		{ "config-reload",            no_argument,       NULL, OPT_CONFIG_RELOAD },
 		{ "switch",                   no_argument,       NULL, OPT_ACTV_SWITCH },
 		{ "expose",                   no_argument,       NULL, OPT_ACTV_EXPOSE },
+		{ "expose-all-monitors",      no_argument,       NULL, OPT_ACTV_EXPOSE_ALL_MONITORS },
 		{ "paging",                   no_argument,       NULL, OPT_ACTV_PAGING },
 		{ "start-daemon",             no_argument,       NULL, OPT_DM_START },
 		{ "stop-daemon",              no_argument,       NULL, OPT_DM_STOP },
@@ -2483,6 +2607,9 @@ parse_args(session_t *ps, int argc, char **argv, bool first_pass) {
 				break;
 			case OPT_ACTV_EXPOSE:
 				ps->o.mode = PROGMODE_EXPOSE;
+				break;
+			case OPT_ACTV_EXPOSE_ALL_MONITORS:
+				ps->o.mode = PROGMODE_EXPOSE_ALL_MONITORS;
 				break;
 			case OPT_ACTV_PAGING:
 				ps->o.mode = PROGMODE_PAGING;
@@ -2612,6 +2739,7 @@ parse_args(session_t *ps, int argc, char **argv, bool first_pass) {
 			ps->o.pivotkey = 64; // switch defaults to pivot with Alt_L
 		}
 		if (ps->o.mode == PROGMODE_EXPOSE
+				|| ps->o.mode == PROGMODE_EXPOSE_ALL_MONITORS
 				|| ps->o.mode == PROGMODE_PAGING) {
 			ps->o.pivotkey = 0; // expose/paging defaults to toggle
 		}

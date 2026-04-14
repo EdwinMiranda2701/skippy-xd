@@ -341,7 +341,21 @@ mainwin_update(MainWin *mw)
 		mainwin_update_background(mw);
 		return;
 	}
-	
+
+	if (ps->o.mode == PROGMODE_EXPOSE_ALL_MONITORS) {
+		XWindowAttributes rootattr;
+		XGetWindowAttributes(ps->dpy, ps->root, &rootattr);
+		mw->x = 0;
+		mw->y = 0;
+		mw->width = rootattr.width;
+		mw->height = rootattr.height;
+		XMoveResizeWindow(ps->dpy, mw->window,
+				mw->x, mw->y, mw->width, mw->height);
+		mw->xin_active = NULL;
+		mainwin_update_background(mw);
+		return;
+	}
+
 	printfdf(false, "(): XINERAMA --> querying pointer... ");
 	XQueryPointer(ps->dpy, ps->root, &dummy_w, &dummy_w, &root_x, &root_y, &dummy_i, &dummy_i, &dummy_u);
 	printfdf(false, "(): XINERAMA +%i+%i\n", root_x, root_y);

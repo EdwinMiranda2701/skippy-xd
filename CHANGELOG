@@ -1,5 +1,9 @@
 Skippy-XD changelog
 
+0.10.7 -- "Skibidi Split" (14 Apr 2026) ~/edwin
+ - Add --expose-all-monitors: activate expose on every monitor simultaneously,
+   partitioning windows per display
+
 0.10.6 -- "Brainrot 67" (4 Jan 2026) ~/felixfung
  - Config file hugely reorganized
  - Add man page
