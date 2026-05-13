@@ -138,6 +138,19 @@ Focus the previous window.
 .B --next
 Focus the next window.
 .TP
+.SS
+.B --creation-order
+Order windows by creation time instead of the WM's stacking order
+(most-recent-use). Per-invocation override; only takes effect for
+window managers that advertise EWMH
+.B _NET_CLIENT_LIST
+support and is ignored when
+.B clientList
+is set to
+.B XQueryTree
+or
+.B _WIN_CLIENT_LIST.
+.TP
 .B Configuration
 .TP
 .SS

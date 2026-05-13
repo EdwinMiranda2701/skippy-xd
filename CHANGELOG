@@ -1,5 +1,12 @@
 Skippy-XD changelog
 
+0.10.8 -- "Sigma Stack" (24 Apr 2026) ~/edwin
+ - Add --creation-order: order windows by creation time instead of the WM's
+   stacking order. Default reverts to stacking order (most-recent-use), as
+   before 0.10.7's accidental switch to creation order
+ - Makefile: object files now depend on version.txt so version bumps
+   trigger a rebuild
+
 0.10.7 -- "Skibidi Split" (14 Apr 2026) ~/edwin
  - Add --expose-all-monitors: activate expose on every monitor simultaneously,
    partitioning windows per display

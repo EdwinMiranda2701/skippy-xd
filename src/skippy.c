@@ -45,6 +45,7 @@ enum pipe_cmd_t {
 enum pipe_param_t {
 	PIPEPRM_RELOAD_CONFIG_PATH = 1,
 	PIPEPRM_RELOAD_CONFIG = 2,
+	PIPEPRM_CREATION_ORDER = 3,
 	PIPEPRM_MULTI_SELECT = 4,
 	PIPEPRM_WM_CLASS = 8,
 	PIPEPRM_WM_TITLE = 16,
@@ -633,7 +634,7 @@ receive_string_in_daemon_via_fifo(session_t *ps, struct pollfd *r_fd,
 
 static char
 read_fifo_command(char *buffer, int cmdlen, int *increment,
-		pid_t *pid, char *nparams, char **param, char ***str) {
+		pid_t *pid, char *nparams, unsigned char **param, char ***str) {
 	char pidbuffer[11];
 	memcpy(pidbuffer, buffer, 10);
 	pidbuffer[10] = '\0';
@@ -658,13 +659,13 @@ read_fifo_command(char *buffer, int cmdlen, int *increment,
 		*nparams = pbuffer[1];
 		printfdf(false, "(): received multi-byte command %d of %d parameters",
 				master_command, *nparams);
-		*param = malloc(*nparams * sizeof(char*));
+		*param = malloc(*nparams * sizeof(**param));
 		*str = malloc(*nparams * sizeof(char*));
 
 		int k=2;
 		*increment = 12 + 2;
 		for (int i=0; i < *nparams; i++) {
-			(*param)[i] = pbuffer[k];
+			(*param)[i] = (unsigned char)pbuffer[k];
 			k++;
 			(*increment)++;
 
@@ -712,6 +713,7 @@ activate_via_fifo(session_t *ps, const char *pipePath) {
 
 	char command[BUF_LEN*2];
 	char nparams = ps->o.multiselect
+		+ ps->o.clientListCreationOrder
 		+ (ps->o.wm_class != NULL) + (ps->o.wm_title != NULL)
 		+ (ps->o.wm_status_count > 0)
 		+ (ps->o.desktops != NULL)
@@ -739,17 +741,26 @@ activate_via_fifo(session_t *ps, const char *pipePath) {
 	}
 	else if (ps->o.config_reload) {
 		printfef(true, "(): reloading existing config file");
-		cmd_len += 2;
-		char cfg_cmd[2];
-		sprintf(cfg_cmd, "%c", PIPEPRM_RELOAD_CONFIG);
+		// Flag parameters need a non-NUL dummy payload because the FIFO
+		// sender still measures packets with strlen().
+		cmd_len += 3;
+		char cfg_cmd[4];
+		sprintf(cfg_cmd, "%c%c0", PIPEPRM_RELOAD_CONFIG, 1);
 		strcat(command, cfg_cmd);
 	}
 
 	if (ps->o.multiselect) {
-		cmd_len += 2;
-		char pivot_cmd[2];
-		sprintf(pivot_cmd, "%c", PIPEPRM_MULTI_SELECT);
+		cmd_len += 3;
+		char pivot_cmd[4];
+		sprintf(pivot_cmd, "%c%c0", PIPEPRM_MULTI_SELECT, 1);
 		strcat(command, pivot_cmd);
+	}
+
+	if (ps->o.clientListCreationOrder) {
+		cmd_len += 3;
+		char co_cmd[4];
+		sprintf(co_cmd, "%c%c0", PIPEPRM_CREATION_ORDER, 1);
+		strcat(command, co_cmd);
 	}
 
 	if (ps->o.wm_class) {
@@ -2079,7 +2090,8 @@ mainloop(session_t *ps, bool activate_on_start) {
 			char *pipestr2 = pipestr;
 
 			while (cmdlen > 0) {
-				char nparams=0, *param=0, **str=0;
+				char nparams=0, **str=0;
+				unsigned char *param=0;
 				pid_t pid = 0;
 				char piped_input = read_fifo_command(pipestr2, cmdlen, &increment,
 						&pid, &nparams, &param, &str);
@@ -2155,6 +2167,10 @@ mainloop(session_t *ps, bool activate_on_start) {
 							ps->o.desktops = NULL;
 						}
 
+						// Per-invocation flag: cleared each time so that
+						// passing --creation-order only affects this call.
+						ps->o.clientListCreationOrder = false;
+
 						animating = activate = true;
 
 						toggling = true;
@@ -2164,7 +2180,16 @@ mainloop(session_t *ps, bool activate_on_start) {
 								ps->o.multiselect = true;
 							}
 
-							if (param[i] & PIPEPRM_WM_CLASS) {
+							if (param[i] == PIPEPRM_CREATION_ORDER) {
+								printfdf(false,"(): creation-order mode");
+								ps->o.clientListCreationOrder = true;
+							}
+
+							// Each PIPEPRM_* tag is a unique value, not a packed
+							// bitmask -- the writer emits exactly one tag byte
+							// per param. Use == so future tag values needn't be
+							// constrained to disjoint power-of-2 bits.
+							if (param[i] == PIPEPRM_WM_CLASS) {
 								if (ps->o.wm_class)
 									free(ps->o.wm_class);
 								ps->o.wm_class = mstrdup(str[i]);
@@ -2172,7 +2197,7 @@ mainloop(session_t *ps, bool activate_on_start) {
 										ps->o.wm_class);
 							}
 
-							if (param[i] & PIPEPRM_WM_TITLE) {
+							if (param[i] == PIPEPRM_WM_TITLE) {
 								if (ps->o.wm_title)
 									free(ps->o.wm_title);
 								ps->o.wm_title = mstrdup(str[i]);
@@ -2180,13 +2205,13 @@ mainloop(session_t *ps, bool activate_on_start) {
 										ps->o.wm_title);
 							}
 
-							if (param[i] & PIPEPRM_PIVOTING) {
+							if (param[i] == PIPEPRM_PIVOTING) {
 								ps->o.pivotkey = str[i][0];
 								printfdf(false, "(): receiving new pivot key=%d",ps->o.pivotkey);
 								toggling = false;
 							}
 
-							if (param[i] & PIPEPRM_WM_STATUS) {
+							if (param[i] == PIPEPRM_WM_STATUS) {
 								if (ps->o.wm_status) {
 									free(ps->o.wm_status);
 									free(ps->o.wm_status_str);
@@ -2198,7 +2223,7 @@ mainloop(session_t *ps, bool activate_on_start) {
 									ps->o.wm_status[j] = ps->o.wm_status_str[j];
 							}
 
-							if (param[i] & PIPEPRM_DESKTOPS) {
+							if (param[i] == PIPEPRM_DESKTOPS) {
 								if (ps->o.desktops)
 									free(ps->o.desktops);
 								ps->o.desktops = mstrdup(str[i]);
@@ -2393,6 +2418,9 @@ show_help() {
 			"  --prev              - focus on the previous window.\n"
 			"  --next              - focus on the next window.\n"
 			"\n"
+			"  --creation-order    - order windows by creation time instead of\n"
+			"                          the WM's stacking order (most recent use).\n"
+			"\n"
 			, stdout);
 #ifdef CFG_LIBPNG
 	spng_about(stdout);
@@ -2535,6 +2563,7 @@ parse_args(session_t *ps, int argc, char **argv, bool first_pass) {
 		OPT_PIVOTING,
 		OPT_PREV,
 		OPT_NEXT,
+		OPT_CREATION_ORDER,
 	};
 	static const char * opts_short = "h";
 	static const struct option opts_long[] = {
@@ -2557,6 +2586,7 @@ parse_args(session_t *ps, int argc, char **argv, bool first_pass) {
 		{ "pivot",                    required_argument, NULL, OPT_PIVOTING },
 		{ "prev",                     no_argument,       NULL, OPT_PREV },
 		{ "next",                     no_argument,       NULL, OPT_NEXT },
+		{ "creation-order",           no_argument,       NULL, OPT_CREATION_ORDER },
 		// { "test",                     no_argument,       NULL, 't' },
 		{ NULL, no_argument, NULL, 0 }
 	};
@@ -2744,6 +2774,9 @@ parse_args(session_t *ps, int argc, char **argv, bool first_pass) {
 			case OPT_NEXT:
 				ps->o.focus_initial++;
 				break;
+			case OPT_CREATION_ORDER:
+				ps->o.clientListCreationOrder = true;
+				break;
 			case OPT_DM_START:
 				ps->o.runAsDaemon = true;
 				break;
@@ -2849,6 +2882,7 @@ load_config_file(session_t *ps)
 		else if (tmp && strcmp(tmp, "_WIN_CLIENT_LIST") == 0)
 			ps->o.clientList = 2;
 	}
+    config_get_bool_wrap(config, "system", "clientListCreationOrder", &ps->o.clientListCreationOrder);
     config_get_bool_wrap(config, "system", "pseudoTrans", &ps->o.pseudoTrans);
 
     config_get_bool_wrap(config, "multimonitor", "showOnlyCurrentMonitor", &ps->o.showOnlyCurrentMonitor);

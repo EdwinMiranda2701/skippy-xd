@@ -39,6 +39,13 @@ clientPath = /tmp/skippy-xd-fofi
 # Try a different option
 clientList = _NET_CLIENT_LIST
 
+# By default skippy-xd asks the WM for windows in stacking order
+# (most-recent-use), so windows you've used recently appear first.
+# Enable this to instead order windows by creation time, matching
+# the pre-0.10.7 behavior. Only effective with clientList = _NET_CLIENT_LIST.
+# Equivalent CLI flag: --creation-order (per-invocation override).
+clientListCreationOrder = false
+
 # When compositors such as picom are not used
 # Turn on pseudo-transparency
 pseudoTrans = true

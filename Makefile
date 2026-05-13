@@ -69,7 +69,7 @@ SRCS = $(foreach name,$(SRCS_RAW),src/$(name).c)
 HDRS = $(foreach name,$(SRCS_RAW),src/$(name).h)
 OBJS = $(foreach name,$(SRCS_RAW),$(name).o)
 
-%.o: src/%.c ${HDRS}
+%.o: src/%.c ${HDRS} version.txt
 	${CC} ${INCS} ${CFLAGS} ${CPPFLAGS} -c src/$*.c
 
 all: ${BINS} skippy-xd.1 skippy-xd.rc

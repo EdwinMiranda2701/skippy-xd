@@ -202,6 +202,7 @@ typedef struct {
 	char *pipePath;
 	char *pipePath2;
 	int clientList;
+	bool clientListCreationOrder;
 	bool pseudoTrans;
 
 	bool showOnlyCurrentMonitor;
@@ -297,6 +298,7 @@ typedef struct {
 	.pipePath = NULL, \
 	.pipePath2 = NULL, \
 	.clientList = 0, \
+	.clientListCreationOrder = false, \
 	.pseudoTrans = true, \
 \
 	.showOnlyCurrentMonitor = false, \

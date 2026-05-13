@@ -58,6 +58,7 @@ static Atom
 	_NET_NUMBER_OF_DESKTOPS,
 	_NET_CLIENT_LIST,
 	_NET_CLIENT_LIST_STACKING,
+	_NET_CLIENT_LIST_CREATION, /* saved copy of _NET_CLIENT_LIST before stacking upgrade */
 	_NET_WM_DESKTOP,
 	_NET_WM_STATE_HIDDEN,
 	_NET_WM_STATE_SKIP_TASKBAR,
@@ -130,6 +131,7 @@ wm_get_atoms(session_t *ps) {
 	T_GETATOM(_NET_SUPPORTED);
 	T_GETATOM(_NET_NUMBER_OF_DESKTOPS);
 	T_GETATOM(_NET_CLIENT_LIST);
+	_NET_CLIENT_LIST_CREATION = _NET_CLIENT_LIST; /* save before wm_check_ewmh can upgrade it */
 	T_GETATOM(_NET_CLIENT_LIST_STACKING);
 	T_GETATOM(_NET_CURRENT_DESKTOP);
 	T_GETATOM(_NET_WM_DESKTOP);
@@ -467,10 +469,29 @@ static inline dlist *
 wm_get_stack_sub(session_t *ps, Window root) {
 	dlist *l = NULL;
 
+	// One-shot warning: --creation-order / clientListCreationOrder only
+	// affects the EWMH (_NET_CLIENT_LIST) path. Surface it on stderr so
+	// the user knows the flag is a no-op under their current clientList.
+	if (ps->o.clientListCreationOrder && ps->o.clientList != 1) {
+		static bool warned = false;
+		if (!warned) {
+			warned = true;
+			printfef(true,
+					"(): warning: --creation-order / clientListCreationOrder "
+					"is only honored when clientList = _NET_CLIENT_LIST; "
+					"ignoring under current clientList=%d.",
+					ps->o.clientList);
+		}
+	}
+
 	// does not give info on windows z-order
 	switch (ps->o.clientList) {
 		// EWMH
 		case 1:
+			if (ps->o.clientListCreationOrder) {
+				printfdf(false, "(): Retrieved window stack from _NET_CLIENT_LIST (creation order).");
+				return wm_get_stack_fromprop(ps, root, _NET_CLIENT_LIST_CREATION);
+			}
 			printfdf(false, "(): Retrieved window stack from _NET_CLIENT_LIST.");
 			return wm_get_stack_fromprop(ps, root, _NET_CLIENT_LIST);
 
