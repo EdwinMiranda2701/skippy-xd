@@ -343,12 +343,22 @@ mainwin_update(MainWin *mw)
 	}
 
 	if (ps->o.mode == PROGMODE_EXPOSE_ALL_MONITORS) {
-		XWindowAttributes rootattr;
-		XGetWindowAttributes(ps->dpy, ps->root, &rootattr);
-		mw->x = 0;
-		mw->y = 0;
-		mw->width = rootattr.width;
-		mw->height = rootattr.height;
+		// Compute the root bounds from cached Xinerama info instead of a
+		// synchronous XGetWindowAttributes round-trip.
+		int min_x = 0, min_y = 0, max_x = 1, max_y = 1;
+		for (int j = 0; j < mw->xin_screens; j++) {
+			XineramaScreenInfo *s = &mw->xin_info[j];
+			int right  = s->x_org + (int)s->width;
+			int bottom = s->y_org + (int)s->height;
+			if (s->x_org < min_x) min_x = s->x_org;
+			if (s->y_org < min_y) min_y = s->y_org;
+			if (right  > max_x) max_x = right;
+			if (bottom > max_y) max_y = bottom;
+		}
+		mw->x = min_x;
+		mw->y = min_y;
+		mw->width = (unsigned int)MAX(max_x - min_x, 1);
+		mw->height = (unsigned int)MAX(max_y - min_y, 1);
 		XMoveResizeWindow(ps->dpy, mw->window,
 				mw->x, mw->y, mw->width, mw->height);
 		mw->xin_active = NULL;

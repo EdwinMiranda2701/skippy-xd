@@ -469,6 +469,10 @@ allocchk_(void *ptr, const char *func_name) {
 #define MAX(a,b) (((a) > (b)) ? (a) : (b))
 #define MIN(a,b) (((a) > (b)) ? (b) : (a))
 
+#define INTERSECTS(x1, y1, w1, h1, x2, y2, w2, h2) \
+	(((x1 >= x2 && x1 < (x2 + w2)) || (x2 >= x1 && x2 < (x1 + w1))) && \
+	 ((y1 >= y2 && y1 < (y2 + h2)) || (y2 >= y1 && y2 < (y1 + h1))))
+
 #define foreach_dlist_vn(itervar, l) \
 	for (dlist *(itervar) = dlist_first(l); (itervar); (itervar) = (itervar)->next)
 #define foreach_dlist(l) foreach_dlist_vn(iter, l)

@@ -1077,11 +1077,40 @@ init_layout_all_monitors(MainWin *mw, enum layoutmode layout, Window leader)
 		return;
 	}
 
+	// count_and_filter_clients() (called from skippy_activate just before us
+	// with mw->xin_active == NULL) has already produced mw->clientondesktop:
+	// every desktop-visible, X11-validated window. Reuse it instead of
+	// re-running clientwin_filter_func per monitor -- each call costs two
+	// synchronous X11 property round-trips per client, so the original
+	// per-monitor scan was paying ~(monitors+1) * windows blocking round-trips
+	// for filtering work we already did once.
+	if (!mw->clientondesktop) {
+		init_focus(mw, layout, leader);
+		mw->multiplier = 1.0f;
+		mw->xoff = 0;
+		mw->yoff = 0;
+		return;
+	}
+
 	struct mon_layout *mons = allocchk(
 			calloc(mw->xin_screens, sizeof(struct mon_layout)));
 
 	XineramaScreenInfo *saved_active = mw->xin_active;
-	long desktop = wm_get_current_desktop(ps);
+
+	// Partition windows per monitor with pure arithmetic intersection.
+	// Windows that span monitors land in every monitor they overlap, matching
+	// the behaviour of the previous per-monitor clientwin_filter_func pass.
+	foreach_dlist (mw->clientondesktop) {
+		ClientWin *cw = iter->data;
+		for (int i = 0; i < mw->xin_screens; i++) {
+			XineramaScreenInfo *s = &mw->xin_info[i];
+			if (INTERSECTS(
+					cw->src0.x, cw->src0.y, cw->src0.width, cw->src0.height,
+					s->x_org, s->y_org, s->width, s->height)) {
+				mons[i].windows = dlist_add(mons[i].windows, cw);
+			}
+		}
+	}
 
 	// Pass 1: layout each monitor's windows in its own logical pixel space
 	// and accumulate the smallest per-monitor fit factor as a single global
@@ -1089,13 +1118,10 @@ init_layout_all_monitors(MainWin *mw, enum layoutmode layout, Window leader)
 	float M = 1.0f;
 	bool have_any = false;
 	for (int i = 0; i < mw->xin_screens; i++) {
-		mw->xin_active = &mw->xin_info[i];
-		mons[i].windows = dlist_first(dlist_find_all(
-				mw->clients,
-				(dlist_match_func) clientwin_filter_func,
-				&desktop));
 		if (!mons[i].windows)
 			continue;
+		mons[i].windows = dlist_first(mons[i].windows);
+		mw->xin_active = &mw->xin_info[i];
 
 		unsigned int tw = 100, th = 100;
 		layout_run(mw, mons[i].windows, &tw, &th, layout);
@@ -1140,20 +1166,13 @@ init_layout_all_monitors(MainWin *mw, enum layoutmode layout, Window leader)
 			cw->y += off_y;
 		}
 
+		// Free only the partition list nodes; the ClientWin* entries
+		// remain owned by mw->clientondesktop / mw->clients.
 		dlist_free(mons[i].windows);
 	}
 
 	free(mons);
 
-	if (mw->clientondesktop) {
-		dlist_free(mw->clientondesktop);
-		mw->clientondesktop = NULL;
-	}
-	mw->xin_active = NULL;
-	mw->clientondesktop = dlist_first(dlist_find_all(
-			mw->clients,
-			(dlist_match_func) clientwin_filter_func,
-			&desktop));
 	mw->xin_active = saved_active;
 
 	// Bypass init_multiplier: we've already handled sizing per-monitor
