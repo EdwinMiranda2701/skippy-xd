@@ -80,21 +80,7 @@ clientwin_filter_func(dlist *l, void *data) {
 		if (w_desktop == -1)
 			filtered_in = true; // always show sticky windows
 
-		int anchor = 0;
-		for (int i=0; i<strlen(ps->o.desktops) + 1 && !filter_matched; i++)
-			if (ps->o.desktops[i] == ',' || ps->o.desktops[i] == '\0') {
-				char *buffer = malloc(i - anchor);
-				memcpy(buffer, ps->o.desktops+anchor, i - anchor);
-				int desktop = atoi(buffer);
-
-				if (desktop == -1)
-					filter_matched = true;
-				else
-					filter_matched = w_desktop == desktop;
-
-				anchor = i + 1;
-				free(buffer);
-			}
+		filter_matched = desktop_filter_matches(ps->o.desktops, w_desktop);
 		filtered_in = filter_matched;
 	}
 
@@ -800,22 +786,22 @@ clientwin_tooltip(ClientWin *cw) {
 				label = wm_get_window_title(ps, cw->mini.window, &len);
 		}
 		else {
-			XClassHint *hints = allocchk(XAllocClassHint());
+			XClassHint *hints = XAllocClassHint();
 			if (hints) {
-				XGetClassHint(ps->dpy, cw->wid_client, hints);
+				if (!XGetClassHint(ps->dpy, cw->wid_client, hints))
+					hints->res_name = hints->res_class = NULL;
 				if (hints->res_class)
-					label = (unsigned char*)hints->res_class;
+					label = (FcChar8 *)mstrdup(hints->res_class);
 				else if (hints->res_name)
-					label = (unsigned char*)hints->res_name;
+					label = (FcChar8 *)mstrdup(hints->res_name);
 
 				len = (!label) ? 0 : strlen((char*)label);
 
-				//if (hints->res_class)
-					//XFree(hints->res_class);
+				if (hints->res_class)
+					XFree(hints->res_class);
 				if (hints->res_name)
 					XFree(hints->res_name);
-				if (hints)
-					XFree(hints);
+				XFree(hints);
 			}
 		}
 

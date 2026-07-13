@@ -482,15 +482,16 @@ DaemonToClientPipeName(session_t *ps, pid_t pid) {
 	return daemon2client_pipe;
 }
 
+static bool write_all(int fd, const uint8_t *data, size_t length);
+
 static void returnToClient(session_t *ps, pid_t pid, char *pipe_return)
 {
 	char *daemon2clientpipe = DaemonToClientPipeName(ps, pid);
 	int fd = open(daemon2clientpipe, O_WRONLY | O_NONBLOCK);
-	int bytes_written = write(fd, pipe_return, strlen(pipe_return));
-	if (bytes_written < strlen(pipe_return)) {
+	if (fd < 0 || !write_all(fd, (const uint8_t *)pipe_return, strlen(pipe_return))) {
 		printfef(true, "(): daemon-to-client packet incomplete!");
 	}
-	close(fd);
+	if (fd >= 0) close(fd);
 	free(daemon2clientpipe);
 }
 
@@ -514,22 +515,6 @@ open_pipe(session_t *ps, struct pollfd *r_fd) {
 	}
 
 	return false;
-}
-
-static inline int
-read_pipe(session_t *ps, struct pollfd *r_fd, char *piped_input) {
-	int read_ret = read(ps->fd_pipe, piped_input, BUF_LEN);
-	if (0 == read_ret) {
-		printfef(true, "(): EOF reached on pipe \"%s\".", ps->o.pipePath);
-		open_pipe(ps, r_fd);
-	}
-	else if (-1 == read_ret) {
-		if (EAGAIN != errno)
-			printfef(true, "(): Reading pipe \"%s\" failed: %d", ps->o.pipePath, errno);
-		//exit(1);
-	}
-
-	return read_ret;
 }
 
 static void
@@ -573,119 +558,99 @@ flush_clients(session_t *ps) {
 	free(fullname);
 }
 
-static void
-send_string_command_to_daemon_via_fifo(
-		const char *pipePath, char* command) {
+static bool
+write_all(int fd, const uint8_t *data, size_t length) {
+	while (length) {
+		ssize_t written = write(fd, data, length);
+		if (written < 0 && errno == EINTR)
+			continue;
+		if (written <= 0)
+			return false;
+		data += (size_t)written;
+		length -= (size_t)written;
+	}
+	return true;
+}
+
+static bool
+send_string_command_to_daemon_via_fifo(const char *pipePath,
+		const uint8_t *command, size_t command_len) {
 	{
 		int access_ret = 0;
 		if ((access_ret = access(pipePath, W_OK))) {
 			printfef(true, "(): Failed to access() pipe \"%s\": %d", pipePath, access_ret);
 			perror("access");
-			exit(1);
+			return false;
 		}
 	}
-
-	// reserve space for first char and null terminator
-	int command_len = strlen(command) + 2 + 10;
-	if (command_len > BUF_LEN) {
-		printfef(true, "(): attempting to send %d character commands, exceeding %d limit",
-				command_len, BUF_LEN);
-		exit(1);
+	uint8_t frame[FIFO_MAX_PAYLOAD + FIFO_FRAME_OVERHEAD];
+	size_t frame_len = 0;
+	if (!fifo_encode_command(getpid(), command, command_len,
+				frame, sizeof(frame), &frame_len)) {
+		printfef(true, "(): command payload exceeds %u-byte FIFO limit",
+				(unsigned)FIFO_MAX_PAYLOAD);
+		return false;
 	}
-	printfdf(false, "(): sending string command to pipe of length %d", command_len);
-
-	char final_cmd[command_len];
-	sprintf(final_cmd, "%010i%c%s", getpid(), (char)strlen(command), command);
-	printfdf(false, "(): string command: %s", final_cmd);
-
-	int fp = open(pipePath, O_WRONLY);
-	int bytes_written = write(fp, final_cmd, command_len);
-	if (bytes_written < strlen(command))
-		printfef(true, "(): incomplete command sent!");
-	close(fp);
+	int fd;
+	do fd = open(pipePath, O_WRONLY); while (fd < 0 && errno == EINTR);
+	if (fd < 0 || !write_all(fd, frame, frame_len)) {
+		printfef(true, "(): failed to send complete daemon command: %s", strerror(errno));
+		if (fd >= 0) close(fd);
+		return false;
+	}
+	close(fd);
+	return true;
 }
 
 static void
 send_command_to_daemon_via_fifo(char command, const char *pipePath) {
 	// single character command is NOT NULL terminated
-	char str[2];
-	sprintf(str, "%c", command);
-	send_string_command_to_daemon_via_fifo(pipePath, str);
+	uint8_t payload = (uint8_t)command;
+	send_string_command_to_daemon_via_fifo(pipePath, &payload, 1u);
 }
 
-static char*
-receive_string_in_daemon_via_fifo(session_t *ps, struct pollfd *r_fd,
-		int *pcmdlen) {
-	char buffer[BUF_LEN];
-	int ret_read = read_pipe(ps, r_fd, &buffer[0]);
+static bool
+read_fifo_command(const fifo_frame_t *frame, uint8_t *master_command,
+		size_t *nparams, unsigned char **param, char ***str) {
+	if (!frame || !frame->payload_len)
+		return false;
+	const uint8_t *pbuffer = frame->payload;
+	*master_command = pbuffer[0];
 
-	char cmdlen = 0;
-	if (ret_read < 1 || (cmdlen = buffer[10]+2+10) > ret_read) {
-		printfef(true, "(): stubbed command received");
-		*pcmdlen = 0;
-		return NULL;
-	}
-
-	*pcmdlen = ret_read;
-	char *pbuffer = malloc(ret_read);
-	memcpy(pbuffer, buffer, ret_read);
-	return pbuffer;
-}
-
-static char
-read_fifo_command(char *buffer, int cmdlen, int *increment,
-		pid_t *pid, char *nparams, unsigned char **param, char ***str) {
-	char pidbuffer[11];
-	memcpy(pidbuffer, buffer, 10);
-	pidbuffer[10] = '\0';
-	*pid = atoi(pidbuffer);
-
-	char *pbuffer = &buffer[11];
-	char master_command = pbuffer[0];
-
-	if ((master_command & PIPECMD_MULTI_BYTE) == 0) {
-		printfdf(false, "(): received single byte command %d", master_command);
+	if ((*master_command & PIPECMD_MULTI_BYTE) == 0) {
 		*nparams = 0;
-		param = NULL;
-		str = NULL;
-		*increment = 11 + 2;
+		*param = NULL;
+		*str = NULL;
+		return frame->payload_len == 1u;
 	}
-	else {
-		if (cmdlen <= 1) {
-			printfef(true, "(): multi-byte command stubbed");
-			exit(1);
-		}
-
-		*nparams = pbuffer[1];
-		printfdf(false, "(): received multi-byte command %d of %d parameters",
-				master_command, *nparams);
-		*param = malloc(*nparams * sizeof(**param));
-		*str = malloc(*nparams * sizeof(char*));
-
-		int k=2;
-		*increment = 12 + 2;
-		for (int i=0; i < *nparams; i++) {
-			(*param)[i] = (unsigned char)pbuffer[k];
-			k++;
-			(*increment)++;
-
-			char nchar = pbuffer[k];
-			printfdf(false, "(): parameter %d takes %d bytes...",
-					(*param)[i], nchar);
-			k++;
-			(*increment)++;
-
-			(*str)[i] = malloc(nchar+1);
-			strncpy((*str)[i], pbuffer + k, nchar);
-			(*str)[i][(int)nchar] = '\0';
-			k += nchar;
-			(*increment) += nchar;
-
-			printfdf(false, "(): received parameter %d%s", (*param)[i], (*str)[i]);
-		}
+	if (frame->payload_len < 2u)
+		return false;
+	*nparams = pbuffer[1];
+	*param = calloc(*nparams, sizeof(**param));
+	*str = calloc(*nparams, sizeof(**str));
+	if ((*nparams && (!*param || !*str)))
+		goto fail;
+	size_t offset = 2u;
+	for (size_t i = 0; i < *nparams; i++) {
+		if (frame->payload_len - offset < 2u)
+			goto fail;
+		(*param)[i] = pbuffer[offset++];
+		size_t nchar = pbuffer[offset++];
+		if (nchar > frame->payload_len - offset)
+			goto fail;
+		(*str)[i] = malloc(nchar + 1u);
+		if (!(*str)[i])
+			goto fail;
+		memcpy((*str)[i], pbuffer + offset, nchar);
+		(*str)[i][nchar] = '\0';
+		offset += nchar;
 	}
-
-	return master_command;
+	return offset == frame->payload_len;
+fail:
+	for (size_t i = 0; i < *nparams; i++) free((*str)[i]);
+	free(*str); free(*param);
+	*str = NULL; *param = NULL; *nparams = 0;
+	return false;
 }
 
 static inline void
@@ -694,7 +659,22 @@ exit_daemon(const char *pipePath) {
 	send_command_to_daemon_via_fifo(PIPECMD_EXIT_DAEMON, pipePath);
 }
 
-static void
+static bool
+append_fifo_param(uint8_t *command, size_t capacity, size_t *length,
+		uint8_t tag, const void *value, size_t value_len) {
+	if (value_len > UINT8_MAX || *length > capacity ||
+			capacity - *length < value_len + 2u)
+		return false;
+	command[(*length)++] = tag;
+	command[(*length)++] = (uint8_t)value_len;
+	if (value_len) {
+		memcpy(command + *length, value, value_len);
+		*length += value_len;
+	}
+	return true;
+}
+
+static bool
 activate_via_fifo(session_t *ps, const char *pipePath) {
 	char master_command = 0;
 	if (ps->o.mode == PROGMODE_SWITCH)
@@ -711,8 +691,8 @@ activate_via_fifo(session_t *ps, const char *pipePath) {
 	else if (ps->o.focus_initial < 0)
 		master_command |= PIPECMD_PREV;
 
-	char command[BUF_LEN*2];
-	char nparams = ps->o.multiselect
+	uint8_t command[FIFO_MAX_PAYLOAD];
+	uint8_t nparams = ps->o.multiselect
 		+ ps->o.clientListCreationOrder
 		+ (ps->o.wm_class != NULL) + (ps->o.wm_title != NULL)
 		+ (ps->o.wm_status_count > 0)
@@ -721,93 +701,70 @@ activate_via_fifo(session_t *ps, const char *pipePath) {
 	if (ps->o.config_reload_path || ps->o.config_reload)
 		nparams++;
 
-	int cmd_len = 1;
+	size_t cmd_len = 1u;
+	command[0] = (uint8_t)master_command;
 	if (nparams > 0) {
 		master_command |= PIPECMD_MULTI_BYTE;
-		sprintf(command, "%c%c", master_command, nparams);
-		cmd_len++;
+		command[0] = (uint8_t)master_command;
+		command[1] = nparams;
+		cmd_len = 2u;
 	}
-	else
-		sprintf(command, "%c", master_command);
+	static const char dummy = '0';
+	bool valid = true;
 
 	if (ps->o.config_reload_path) {
 		printfef(true, "(): loading new config file path \"%s\"", ps->o.config_path);
-		cmd_len += 1+1+strlen(ps->o.config_path)+1;
-		char cfg_cmd[1+1+strlen(ps->o.config_path)+1];
-		sprintf(cfg_cmd, "%c%c%s",
-				PIPEPRM_RELOAD_CONFIG_PATH,
-				(char)strlen(ps->o.config_path), ps->o.config_path);
-		strcat(command, cfg_cmd);
+		valid &= append_fifo_param(command, sizeof(command), &cmd_len,
+				PIPEPRM_RELOAD_CONFIG_PATH, ps->o.config_path, strlen(ps->o.config_path));
 	}
 	else if (ps->o.config_reload) {
 		printfef(true, "(): reloading existing config file");
-		// Flag parameters need a non-NUL dummy payload because the FIFO
-		// sender still measures packets with strlen().
-		cmd_len += 3;
-		char cfg_cmd[4];
-		sprintf(cfg_cmd, "%c%c0", PIPEPRM_RELOAD_CONFIG, 1);
-		strcat(command, cfg_cmd);
+		valid &= append_fifo_param(command, sizeof(command), &cmd_len,
+				PIPEPRM_RELOAD_CONFIG, &dummy, 1u);
 	}
 
 	if (ps->o.multiselect) {
-		cmd_len += 3;
-		char pivot_cmd[4];
-		sprintf(pivot_cmd, "%c%c0", PIPEPRM_MULTI_SELECT, 1);
-		strcat(command, pivot_cmd);
+		valid &= append_fifo_param(command, sizeof(command), &cmd_len,
+				PIPEPRM_MULTI_SELECT, &dummy, 1u);
 	}
 
 	if (ps->o.clientListCreationOrder) {
-		cmd_len += 3;
-		char co_cmd[4];
-		sprintf(co_cmd, "%c%c0", PIPEPRM_CREATION_ORDER, 1);
-		strcat(command, co_cmd);
+		valid &= append_fifo_param(command, sizeof(command), &cmd_len,
+				PIPEPRM_CREATION_ORDER, &dummy, 1u);
 	}
 
 	if (ps->o.wm_class) {
-		cmd_len += 1+1+strlen(ps->o.wm_class)+1;
-		char wm_cmd[1+1+strlen(ps->o.wm_class)+1];
-		sprintf(wm_cmd, "%c%c%s",
-				PIPEPRM_WM_CLASS, (char)strlen(ps->o.wm_class), ps->o.wm_class);
-		strcat(command, wm_cmd);
+		valid &= append_fifo_param(command, sizeof(command), &cmd_len,
+				PIPEPRM_WM_CLASS, ps->o.wm_class, strlen(ps->o.wm_class));
 	}
 
 	if (ps->o.wm_title) {
-		cmd_len += 1+1+strlen(ps->o.wm_title)+1;
-		char wm_cmd[1+1+strlen(ps->o.wm_title)+1];
-		sprintf(wm_cmd, "%c%c%s",
-				PIPEPRM_WM_TITLE, (char)strlen(ps->o.wm_title), ps->o.wm_title);
-		strcat(command, wm_cmd);
+		valid &= append_fifo_param(command, sizeof(command), &cmd_len,
+				PIPEPRM_WM_TITLE, ps->o.wm_title, strlen(ps->o.wm_title));
 	}
 
 	if (ps->o.wm_status) {
-		cmd_len += 1+1+ps->o.wm_status_count+1;
-		char status[1+1+ps->o.wm_status_count+1];
-		sprintf(status, "%c%c%s",
-				PIPEPRM_WM_STATUS, (char)ps->o.wm_status_count, ps->o.wm_status_str);
-		strcat(command, status);
+		valid &= append_fifo_param(command, sizeof(command), &cmd_len,
+				PIPEPRM_WM_STATUS, ps->o.wm_status_str,
+				(size_t)ps->o.wm_status_count);
 	}
 
 	if (ps->o.desktops) {
-		cmd_len += 1+1+strlen(ps->o.desktops)+1;
-		char wm_cmd[1+1+strlen(ps->o.desktops)+1];
-		sprintf(wm_cmd, "%c%c%s",
-				PIPEPRM_DESKTOPS, (char)strlen(ps->o.desktops), ps->o.desktops);
-		strcat(command, wm_cmd);
+		valid &= append_fifo_param(command, sizeof(command), &cmd_len,
+				PIPEPRM_DESKTOPS, ps->o.desktops, strlen(ps->o.desktops));
 	}
 
 	if (ps->o.pivotkey) {
-		char pivot_cmd[4];
-		sprintf(pivot_cmd, "%c%c%c", PIPEPRM_PIVOTING, 1, ps->o.pivotkey);
-		strcat(command, pivot_cmd);
-		cmd_len += 4;
+		valid &= append_fifo_param(command, sizeof(command), &cmd_len,
+				PIPEPRM_PIVOTING, &ps->o.pivotkey, 1u);
 	}
 
-	if (cmd_len > BUF_LEN) {
-		printfef(true, "(): attempting to send %d character commands, exceeding %d limit",
-				cmd_len, BUF_LEN);
-		exit(1);
+	if (!valid || cmd_len > FIFO_MAX_PAYLOAD) {
+		printfef(true, "(): command payload exceeds %u-byte FIFO limit",
+				(unsigned)FIFO_MAX_PAYLOAD);
+		return false;
 	}
-	send_string_command_to_daemon_via_fifo(pipePath, command);
+	return send_string_command_to_daemon_via_fifo(pipePath, command, cmd_len);
 }
 
 static void
@@ -1463,6 +1420,8 @@ mainloop(session_t *ps, bool activate_on_start) {
 	pid_t trigger_client = 0;
 	bool checkfocus = false;
 	bool switchdesktop = false;
+	uint8_t fifo_buffer[BUF_LEN];
+	size_t fifo_length = 0;
 
 	switch (ps->o.mode) {
 		case PROGMODE_SWITCH:
@@ -2085,16 +2044,44 @@ mainloop(session_t *ps, bool activate_on_start) {
 
 		// Handle daemon commands
 		if (POLLIN & r_fd[1].revents) {
-			int cmdlen = 0, increment = 0;
-			char *pipestr = receive_string_in_daemon_via_fifo(ps, r_fd, &cmdlen);
-			char *pipestr2 = pipestr;
+			if (fifo_length == sizeof(fifo_buffer)) {
+				printfef(true, "(): malformed FIFO input filled receive buffer");
+				fifo_length = 0;
+			}
+			ssize_t received;
+			do received = read(ps->fd_pipe, fifo_buffer + fifo_length,
+					sizeof(fifo_buffer) - fifo_length);
+			while (received < 0 && errno == EINTR);
+			if (received > 0)
+				fifo_length += (size_t)received;
+			else if (received == 0)
+				open_pipe(ps, r_fd);
+			else if (errno != EAGAIN && errno != EWOULDBLOCK)
+				printfef(true, "(): reading FIFO failed: %s", strerror(errno));
 
-			while (cmdlen > 0) {
-				char nparams=0, **str=0;
+			while (fifo_length > 0) {
+				fifo_frame_t frame;
+				enum fifo_decode_result decoded = fifo_decode_command(
+						fifo_buffer, fifo_length, &frame);
+				if (decoded == FIFO_DECODE_INCOMPLETE)
+					break;
+				if (decoded == FIFO_DECODE_MALFORMED) {
+					printfef(true, "(): discarded malformed FIFO input");
+					fifo_length = 0;
+					break;
+				}
+				size_t nparams = 0;
+				char **str = NULL;
 				unsigned char *param=0;
-				pid_t pid = 0;
-				char piped_input = read_fifo_command(pipestr2, cmdlen, &increment,
-						&pid, &nparams, &param, &str);
+				pid_t pid = frame.pid;
+				uint8_t piped_input = 0;
+				if (!read_fifo_command(&frame, &piped_input, &nparams, &param, &str)) {
+					printfef(true, "(): discarded malformed FIFO command payload");
+					memmove(fifo_buffer, fifo_buffer + frame.frame_len,
+							fifo_length - frame.frame_len);
+					fifo_length -= frame.frame_len;
+					continue;
+				}
 				printfdf(false, "(): Received pipe command: %d from %010i",
 						piped_input, pid);
 
@@ -2107,17 +2094,24 @@ mainloop(session_t *ps, bool activate_on_start) {
 					return;
 				}
 
-				for (int i=0; i<nparams; i++) {
+				for (size_t i=0; i<nparams; i++) {
 					if (param[i] == PIPEPRM_RELOAD_CONFIG_PATH) {
-						if (ps->o.config_path)
-							free(ps->o.config_path);
+						char *old_config_path = ps->o.config_path;
 						ps->o.config_path = mstrdup(str[i]);
-						load_config_file(ps);
-						mainwin_reload(ps, ps->mainwin);
+						if (load_config_file(ps) == RET_SUCCESS) {
+							free(old_config_path);
+							mainwin_reload(ps, ps->mainwin);
+						} else {
+							free(ps->o.config_path);
+							ps->o.config_path = old_config_path;
+							printfef(true, "(): config reload failed; daemon remains active");
+						}
 					}
 					if (param[i] == PIPEPRM_RELOAD_CONFIG) {
-						load_config_file(ps);
-						mainwin_reload(ps, ps->mainwin);
+						if (load_config_file(ps) == RET_SUCCESS)
+							mainwin_reload(ps, ps->mainwin);
+						else
+							printfef(true, "(): config reload failed; daemon remains active");
 					}
 				}
 
@@ -2174,7 +2168,7 @@ mainloop(session_t *ps, bool activate_on_start) {
 						animating = activate = true;
 
 						toggling = true;
-						for (int i=0; i<nparams; i++) {
+						for (size_t i=0; i<nparams; i++) {
 							if (param[i] == PIPEPRM_MULTI_SELECT) {
 								printfdf(false,"(): multi-select mode");
 								ps->o.multiselect = true;
@@ -2224,11 +2218,14 @@ mainloop(session_t *ps, bool activate_on_start) {
 							}
 
 							if (param[i] == PIPEPRM_DESKTOPS) {
-								if (ps->o.desktops)
+								if (desktop_filter_valid(str[i])) {
 									free(ps->o.desktops);
-								ps->o.desktops = mstrdup(str[i]);
-								printfdf(false, "(): receiving new desktops=%s",
-										ps->o.desktops);
+									ps->o.desktops = mstrdup(str[i]);
+									printfdf(false, "(): receiving new desktops=%s",
+											ps->o.desktops);
+								} else {
+									printfef(true, "(): ignored invalid desktop filter from FIFO");
+								}
 							}
 						}
 
@@ -2291,17 +2288,16 @@ mainloop(session_t *ps, bool activate_on_start) {
 				// free receive_string_in_daemon_via_fifo() paramters
 				if (param)
 					free(param);
-				for (int i=0; i<nparams; i++)
+				for (size_t i=0; i<nparams; i++)
 					if (str[i])
 						free(str[i]);
 				if (str)
 					free(str);
 
-				pipestr2 += increment;
-				cmdlen -= increment;
+				memmove(fifo_buffer, fifo_buffer + frame.frame_len,
+						fifo_length - frame.frame_len);
+				fifo_length -= frame.frame_len;
 			}
-			if (pipestr)
-				free(pipestr);
 		}
 
 		if (POLLHUP & r_fd[1].revents) {
@@ -2703,52 +2699,29 @@ parse_args(session_t *ps, int argc, char **argv, bool first_pass) {
 				break;
 			case OPT_WM_STATUS:
 			{
-				int anchor = 0;
-				for (int i=0; i<strlen(optarg) + 1; i++)
-					if (optarg[i] == ',' || optarg[i] == '\0') {
-						char *status = malloc(i - anchor);
-						for (int j=anchor; j<i; j++)
-							status[j-anchor] = optarg[j];
-						status[i-anchor] = '\0';
-						anchor = i + 1;
-
-						int wm_status = wm_get_status(status);
-						if (wm_status == 0) {
-							printfef(true,
-								"(): window status %s not recognized",
-								status);
-							exit(1);
-						}
-						free(status);
-
-						int count = ps->o.wm_status_count;
-
-						int *newptr = malloc(count+1);
-						for (int j=0; j<count; j++)
-							newptr[j] = ps->o.wm_status[j];
-						newptr[count] = wm_status;
-
-						ps->o.wm_status_count++;
-						free(ps->o.wm_status);
-
-						ps->o.wm_status = newptr;
-					}
-
-				ps->o.wm_status_str = malloc(ps->o.wm_status_count+1);
-				for (int i=0; i<ps->o.wm_status_count; i++)
-					ps->o.wm_status_str[i] = ps->o.wm_status[i];
-				ps->o.wm_status_str[ps->o.wm_status_count] = '\0';
+				int *statuses = NULL;
+				size_t count = 0;
+				char *encoded = NULL;
+				if (!parse_status_list(optarg, wm_get_status,
+							&statuses, &count, &encoded) || count > INT_MAX) {
+					free(statuses);
+					free(encoded);
+					printfef(true, "(): invalid --wm-status value \"%s\"", optarg);
+					exit(RET_BADARG);
+				}
+				free(ps->o.wm_status);
+				free(ps->o.wm_status_str);
+				ps->o.wm_status = statuses;
+				ps->o.wm_status_count = (int)count;
+				ps->o.wm_status_str = encoded;
 			}
 
 				break;
 			case OPT_DESKTOP:
-				for (int i=0; i<strlen(optarg); i++)
-					if (optarg[i] != '-' && optarg[i] != ','
-							&& !('0'<=optarg[i] && optarg[i]<='9')) {
-						printfef(true,
-							"(): --desktop argument accepts only numerals and comma");
-						exit(1);
-					}
+				if (!desktop_filter_valid(optarg)) {
+					printfef(true, "(): invalid --desktop filter \"%s\"", optarg);
+					exit(RET_BADARG);
+				}
 
 				if (ps->o.desktops)
 					free(ps->o.desktops);
@@ -2811,7 +2784,7 @@ update_and_flag(dlist *config,
 				config_section, config_option, defaultvalue));
 
 	bool updated = true;
-	if (*ptr && **ptr) {
+	if (*ptr) {
 		updated = strcmp(*ptr, temp) != 0;
 		free(*ptr);
 	}
@@ -2842,8 +2815,9 @@ load_config_file(session_t *ps)
             return 1;
     }
 
-    char *lc_numeric_old = mstrdup(setlocale(LC_NUMERIC, NULL));
-    setlocale(LC_NUMERIC, "C");
+	char *lc_numeric_old = mstrdup(setlocale(LC_NUMERIC, NULL));
+	setlocale(LC_NUMERIC, "C");
+	int ret = RET_SUCCESS;
 
     // Read configuration into ps->o, because searching all the time is much
     // less efficient, may introduce inconsistent default value, and
@@ -2853,7 +2827,7 @@ load_config_file(session_t *ps)
 		// null terminator
 		int pipeStrLen0 = 1;
 
-		char *xev = getenv("DISPLAY");
+		const char *xev = DisplayString(ps->dpy);
 		pipeStrLen0 += strlen(xev);
 
 		const char * path = config_get(config, "system", "daemonPath", "/tmp/skippy-xd-fifo");
@@ -2862,12 +2836,14 @@ load_config_file(session_t *ps)
 		const char * path2 = config_get(config, "system", "clientPath", "/tmp/skippy-xd-fofi");
 		int pipeStrLen2 = pipeStrLen0 + strlen(path2);
 
-		char * pipePath = malloc (pipeStrLen1 * sizeof(unsigned char));
+		char * pipePath = allocchk(malloc((size_t)pipeStrLen1));
 		sprintf(pipePath, "%s%s", path, xev);
 
-		char * pipePath2 = malloc (pipeStrLen2 * sizeof(unsigned char));
+		char * pipePath2 = allocchk(malloc((size_t)pipeStrLen2));
 		sprintf(pipePath2, "%s%s", path2, xev);
 
+		free(ps->o.pipePath);
+		free(ps->o.pipePath2);
 		ps->o.pipePath = pipePath;
 		ps->o.pipePath2 = pipePath2;
 	}
@@ -2942,17 +2918,18 @@ load_config_file(session_t *ps)
         const char *sspec = config_get(config, "appearance", "background", "#00000055");
 		if (!sspec || strlen(sspec) == 0)
 			sspec = "#00000055";
-		char bg_spec[256] = "orig top left ";
-		strcat(bg_spec, sspec);
+		char *bg_spec = mstrjoin("orig top left ", sspec);
 
 		pictspec_t spec = PICTSPECT_INIT;
 		if (strcmp("None", sspec) == 0) {
-			ps->o.background = None;
+			free_pictw(ps, &ps->o.background);
 		}
 		else if (!parse_pictspec(ps, bg_spec, &spec)) {
-			ps->o.background = None;
-			return RET_BADARG;
+			free(bg_spec);
+			ret = RET_BADARG;
+			goto config_end;
 		}
+		free(bg_spec);
 		free_pictspec(ps, &ps->o.bg_spec);
 		ps->o.bg_spec = spec;
 	}
@@ -2972,71 +2949,99 @@ load_config_file(session_t *ps)
 
         bool thumbnail_icons = true;
         config_get_bool_wrap(config, "livepreview", "icon", &thumbnail_icons);
-        if (thumbnail_icons) {
-            ps->o.clientDisplayModes = allocchk(malloc(sizeof(DEF_CLIDISPM_ICON)));
-            memcpy(ps->o.clientDisplayModes, &DEF_CLIDISPM_ICON, sizeof(DEF_CLIDISPM_ICON));
-        }
-        else {
-            ps->o.clientDisplayModes = allocchk(malloc(sizeof(DEF_CLIDISPM)));
-            memcpy(ps->o.clientDisplayModes, &DEF_CLIDISPM, sizeof(DEF_CLIDISPM));
+		if (thumbnail_icons) {
+			client_disp_mode_t *modes = allocchk(malloc(sizeof(DEF_CLIDISPM_ICON)));
+			memcpy(modes, &DEF_CLIDISPM_ICON, sizeof(DEF_CLIDISPM_ICON));
+			free(ps->o.clientDisplayModes);
+			ps->o.clientDisplayModes = modes;
+		}
+		else {
+			client_disp_mode_t *modes = allocchk(malloc(sizeof(DEF_CLIDISPM)));
+			memcpy(modes, &DEF_CLIDISPM, sizeof(DEF_CLIDISPM));
+			free(ps->o.clientDisplayModes);
+			ps->o.clientDisplayModes = modes;
         }
     }
 	{
-		char defaultstr2[256] = "orig ";
 		const char* sspec2 = config_get(config, "livepreview", "iconPlace", "top left");
-		strcat(defaultstr2, sspec2);
-		const char space[] = " ";
-		strcat(defaultstr2, space);
-		char sspec[] = "#333333";
-		strcat(defaultstr2, sspec);
+		char *defaultstr2a = mstrjoin3("orig ", sspec2, " ");
+		char *defaultstr2 = mstrjoin(defaultstr2a, "#333333");
+		free(defaultstr2a);
 
 		config_get_int_wrap(config, "livepreview", "iconSize",
 				&ps->o.iconSize, 1, INT_MAX);
 
-		if (!parse_pictspec(ps, defaultstr2, &ps->o.iconSpec))
-			return RET_BADARG;
-		if (!simg_cachespec(ps, &ps->o.iconSpec))
-			return RET_BADARG;
+		pictspec_t icon_spec = PICTSPECT_INIT;
+		if (!parse_pictspec(ps, defaultstr2, &icon_spec)) {
+			free(defaultstr2); ret = RET_BADARG; goto config_end;
+		}
+		free(defaultstr2);
+		if (!simg_cachespec(ps, &icon_spec)) {
+			free_pictspec(ps, &icon_spec);
+			ret = RET_BADARG; goto config_end;
+		}
 
-		if (ps->o.iconSpec.path
-				&& !(ps->o.iconDefault = simg_load(ps, ps->o.iconSpec.path,
+		pictw_t *icon_default = NULL;
+		if (icon_spec.path
+				&& !(icon_default = simg_load(ps, icon_spec.path,
 						PICTPOSP_SCALEK, ps->o.iconSize, ps->o.iconSize,
 						ALIGN_MID, ALIGN_MID, NULL)))
-			return RET_BADARG;
-}
+			{ free_pictspec(ps, &icon_spec); ret = RET_BADARG; goto config_end; }
+		free_pictspec(ps, &ps->o.iconSpec);
+		free_pictw(ps, &ps->o.iconDefault);
+		ps->o.iconSpec = icon_spec;
+		ps->o.iconDefault = icon_default;
+	}
 	{
-		char defaultstr[256] = "orig top left ";
 		const char* sspec = config_get(config, "filler", "color", "#333333");
-		strcat(defaultstr, sspec);
-		if (!parse_pictspec(ps, defaultstr, &ps->o.fillSpec))
-			return RET_BADARG;
+		char *defaultstr = mstrjoin("orig top left ", sspec);
+		pictspec_t fill_spec = PICTSPECT_INIT;
+		if (!parse_pictspec(ps, defaultstr, &fill_spec)) {
+			free(defaultstr); ret = RET_BADARG; goto config_end;
+		}
+		free(defaultstr);
 
-		char defaultstr2[256] = "orig ";
 		const char* sspec2 = config_get(config, "filler", "iconPlace", "top left");
-		strcat(defaultstr2, sspec2);
-		const char space[] = " ";
-		strcat(defaultstr2, space);
-		strcat(defaultstr2, sspec);
+		char *defaultstr2a = mstrjoin3("orig ", sspec2, " ");
+		char *defaultstr2 = mstrjoin(defaultstr2a, sspec);
+		free(defaultstr2a);
 
 		config_get_int_wrap(config, "filler", "iconSize",
 				&ps->o.fillerIconSize, 0, 256);
 
-		if (!parse_pictspec(ps, defaultstr2, &ps->o.iconFillSpec))
-			return RET_BADARG;
-		if (!simg_cachespec(ps, &ps->o.iconFillSpec))
-			return RET_BADARG;
+		pictspec_t icon_fill_spec = PICTSPECT_INIT;
+		if (!parse_pictspec(ps, defaultstr2, &icon_fill_spec)) {
+			free_pictspec(ps, &fill_spec);
+			free(defaultstr2); ret = RET_BADARG; goto config_end;
+		}
+		free(defaultstr2);
+		if (!simg_cachespec(ps, &icon_fill_spec)) {
+			free_pictspec(ps, &fill_spec);
+			free_pictspec(ps, &icon_fill_spec);
+			ret = RET_BADARG; goto config_end;
+		}
 
-		if (ps->o.iconFillSpec.path
-				&& !(ps->o.iconFiller = simg_load(ps, ps->o.iconFillSpec.path,
+		pictw_t *icon_filler = NULL;
+		if (icon_fill_spec.path
+				&& !(icon_filler = simg_load(ps, icon_fill_spec.path,
 						PICTPOSP_SCALEK, ps->o.fillerIconSize, ps->o.fillerIconSize,
 						ALIGN_MID, ALIGN_MID, NULL)))
-			return RET_BADARG;
+			{ free_pictspec(ps, &fill_spec); free_pictspec(ps, &icon_fill_spec);
+				ret = RET_BADARG; goto config_end; }
+		free_pictspec(ps, &ps->o.fillSpec);
+		free_pictspec(ps, &ps->o.iconFillSpec);
+		free_pictw(ps, &ps->o.iconFiller);
+		ps->o.fillSpec = fill_spec;
+		ps->o.iconFillSpec = icon_fill_spec;
+		ps->o.iconFiller = icon_filler;
 	}
 
     config_get_int_wrap(config, "livepreview", "opacity", &ps->o.normal_opacity, 0, 256);
+	free(ps->o.highlight_tint);
 	ps->o.highlight_tint = mstrdup(config_get(config, "highlight", "tint", "#FFFFFF"));
     config_get_int_wrap(config, "highlight", "tintOpacity", &ps->o.highlight_tintOpacity, 0, 256);
     config_get_int_wrap(config, "filler", "opacity", &ps->o.shadow_opacity, 0, 256);
+	free(ps->o.multiselect_tint);
 	ps->o.multiselect_tint = mstrdup(config_get(config, "multiselect", "tint", "#66B6F6"));
     config_get_int_wrap(config, "multiselect", "tintOpacity", &ps->o.multiselect_tintOpacity, 0, 256);
 
@@ -3078,17 +3083,28 @@ load_config_file(session_t *ps)
     config_get_int_wrap(config, "bindings", "pivotLockingTime", &ps->o.pivotLockingTime, 0, 20000);
 
     // load keybindings settings
-    ps->o.bindings_keysUp = mstrdup(config_get(config, "bindings", "keysUp", "Up"));
-    ps->o.bindings_keysDown = mstrdup(config_get(config, "bindings", "keysDown", "Down"));
-    ps->o.bindings_keysLeft = mstrdup(config_get(config, "bindings", "keysLeft", "Left"));
-    ps->o.bindings_keysRight = mstrdup(config_get(config, "bindings", "keysRight", "Right"));
-    ps->o.bindings_keysPrev = mstrdup(config_get(config, "bindings", "keysPrev", "p"));
-    ps->o.bindings_keysNext = mstrdup(config_get(config, "bindings", "keysNext", "n"));
-    ps->o.bindings_keysCancel = mstrdup(config_get(config, "bindings", "keysCancel", "Escape"));
-    ps->o.bindings_keysSelect = mstrdup(config_get(config, "bindings", "keysSelect", "Return space"));
-    ps->o.bindings_keysIconify = mstrdup(config_get(config, "bindings", "keysIconify", "1"));
-    ps->o.bindings_keysShade = mstrdup(config_get(config, "bindings", "keysShade", "2"));
-    ps->o.bindings_keysClose = mstrdup(config_get(config, "bindings", "keysClose", "3"));
+	free(ps->o.bindings_keysUp);
+	ps->o.bindings_keysUp = mstrdup(config_get(config, "bindings", "keysUp", "Up"));
+	free(ps->o.bindings_keysDown);
+	ps->o.bindings_keysDown = mstrdup(config_get(config, "bindings", "keysDown", "Down"));
+	free(ps->o.bindings_keysLeft);
+	ps->o.bindings_keysLeft = mstrdup(config_get(config, "bindings", "keysLeft", "Left"));
+	free(ps->o.bindings_keysRight);
+	ps->o.bindings_keysRight = mstrdup(config_get(config, "bindings", "keysRight", "Right"));
+	free(ps->o.bindings_keysPrev);
+	ps->o.bindings_keysPrev = mstrdup(config_get(config, "bindings", "keysPrev", "p"));
+	free(ps->o.bindings_keysNext);
+	ps->o.bindings_keysNext = mstrdup(config_get(config, "bindings", "keysNext", "n"));
+	free(ps->o.bindings_keysCancel);
+	ps->o.bindings_keysCancel = mstrdup(config_get(config, "bindings", "keysCancel", "Escape"));
+	free(ps->o.bindings_keysSelect);
+	ps->o.bindings_keysSelect = mstrdup(config_get(config, "bindings", "keysSelect", "Return space"));
+	free(ps->o.bindings_keysIconify);
+	ps->o.bindings_keysIconify = mstrdup(config_get(config, "bindings", "keysIconify", "1"));
+	free(ps->o.bindings_keysShade);
+	ps->o.bindings_keysShade = mstrdup(config_get(config, "bindings", "keysShade", "2"));
+	free(ps->o.bindings_keysClose);
+	ps->o.bindings_keysClose = mstrdup(config_get(config, "bindings", "keysClose", "3"));
 
     // print an error message for any key bindings that aren't recognized
     check_keysyms(ps->o.config_path, ": [bindings] keysUp =", ps->o.bindings_keysUp);
@@ -3108,14 +3124,15 @@ load_config_file(session_t *ps)
 			|| !parse_cliop(ps, config_get(config, "bindings", "miwMouse3", "iconify"), &ps->o.bindings_miwMouse[3])
 			|| !parse_cliop(ps, config_get(config, "bindings", "miwMouse4", "keysNext"), &ps->o.bindings_miwMouse[4])
 			|| !parse_cliop(ps, config_get(config, "bindings", "miwMouse5", "keysPrev"), &ps->o.bindings_miwMouse[5])) {
-		return RET_BADARG;
+		{ ret = RET_BADARG; goto config_end; }
 	}
 
+config_end:
     setlocale(LC_NUMERIC, lc_numeric_old);
     free(lc_numeric_old);
     config_free(config);
 
-	return RET_SUCCESS;
+	return ret;
 }
 
 int main(int argc, char *argv[]) {
@@ -3158,8 +3175,10 @@ int main(int argc, char *argv[]) {
 	wm_get_atoms(ps);
 
 	int config_load_ret = load_config_file(ps);
-	if (config_load_ret != 0)
-		return config_load_ret;
+	if (config_load_ret != 0) {
+		ret = config_load_ret;
+		goto main_end;
+	}
 
 	// Second pass
 	parse_args(ps, argc, argv, false);
@@ -3174,7 +3193,8 @@ int main(int argc, char *argv[]) {
 			if (!ps->o.runAsDaemon &&
 					(ps->o.config_reload || ps->o.config_reload_path
 					 || ps->o.config_blank)) {
-				activate_via_fifo(ps, pipePath);
+				if (!activate_via_fifo(ps, pipePath))
+					ret = RET_BADARG;
 				goto main_end;
 			}
 			break;
@@ -3215,11 +3235,30 @@ int main(int argc, char *argv[]) {
 				goto main_end;
 			}
 
-			activate_via_fifo(ps, pipePath);
+			if (!activate_via_fifo(ps, pipePath)) {
+				close(ps->fd_pipe2);
+				ps->fd_pipe2 = -1;
+				unlink(daemon2client_pipe);
+				free(daemon2client_pipe);
+				ret = RET_BADARG;
+				goto main_end;
+			}
 
-			poll(&r_fd, 1, -1);
+			int poll_ret;
+			do poll_ret = poll(&r_fd, 1, -1); while (poll_ret < 0 && errno == EINTR);
+			if (poll_ret <= 0 || !(r_fd.revents & (POLLIN | POLLHUP))) {
+				printfef(true, "(): failed waiting for daemon response: %s",
+						poll_ret < 0 ? strerror(errno) : "unexpected poll event");
+				close(ps->fd_pipe2);
+				ps->fd_pipe2 = -1;
+				unlink(daemon2client_pipe);
+				free(daemon2client_pipe);
+				ret = RET_UNKNOWN;
+				goto main_end;
+			}
 			char buffer[1024];
-			int read_ret = read(ps->fd_pipe2, buffer, 1023);
+			ssize_t read_ret;
+			do read_ret = read(ps->fd_pipe2, buffer, 1023); while (read_ret < 0 && errno == EINTR);
 			close(ps->fd_pipe2);
 			unlink(daemon2client_pipe);
 			free(daemon2client_pipe);
@@ -3299,8 +3338,10 @@ main_end:
 			free(ps->o.pipePath2);
 			free(ps->o.clientDisplayModes);
 			free(ps->o.highlight_tint);
+			free(ps->o.multiselect_tint);
 			free(ps->o.tooltip_border);
 			free(ps->o.tooltip_background);
+			free(ps->o.tooltip_backgroundHighlight);
 			free(ps->o.tooltip_text);
 			free(ps->o.tooltip_textOutline);
 			free(ps->o.tooltip_font);
@@ -3308,6 +3349,7 @@ main_end:
 			free_pictspec(ps, &ps->o.bg_spec);
 			free_pictw(ps, &ps->o.iconDefault);
 			free_pictw(ps, &ps->o.iconFiller);
+			free_pictspec(ps, &ps->o.iconSpec);
 			free_pictspec(ps, &ps->o.fillSpec);
 			free_pictspec(ps, &ps->o.iconFillSpec);
 			free(ps->o.bindings_keysUp);
@@ -3327,10 +3369,8 @@ main_end:
 			free(ps->o.wm_class);
 		if (ps->o.wm_title)
 			free(ps->o.wm_title);
-		if (ps->o.wm_status_count > 0)
-			free(ps->o.wm_status);
-		if (ps->o.wm_status_count > 0)
-			free(ps->o.wm_status_str);
+		free(ps->o.wm_status);
+		free(ps->o.wm_status_str);
 		if (ps->o.desktops)
 			free(ps->o.desktops);
 

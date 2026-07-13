@@ -129,31 +129,25 @@ MainWin *
 mainwin_reload(session_t *ps, MainWin *mw) {
 	Display * const dpy = ps->dpy;
 
-	// convert the keybindings settings strings into arrays of KeySyms
-	keys_str_syms(ps->o.bindings_keysUp, &mw->keysyms_Up);
-	keys_str_syms(ps->o.bindings_keysDown, &mw->keysyms_Down);
-	keys_str_syms(ps->o.bindings_keysLeft, &mw->keysyms_Left);
-	keys_str_syms(ps->o.bindings_keysRight, &mw->keysyms_Right);
-	keys_str_syms(ps->o.bindings_keysPrev, &mw->keysyms_Prev);
-	keys_str_syms(ps->o.bindings_keysNext, &mw->keysyms_Next);
-	keys_str_syms(ps->o.bindings_keysCancel, &mw->keysyms_Cancel);
-	keys_str_syms(ps->o.bindings_keysSelect, &mw->keysyms_Select);
-	keys_str_syms(ps->o.bindings_keysIconify, &mw->keysyms_Iconify);
-	keys_str_syms(ps->o.bindings_keysShade, &mw->keysyms_Shade);
-	keys_str_syms(ps->o.bindings_keysClose, &mw->keysyms_Close);
+	struct key_arrays { KeySym *syms; KeyCode *codes; };
+#define BUILD_KEYS(name) \
+	struct key_arrays new_##name = { 0 }; \
+	keys_str_syms(ps->o.bindings_keys##name, &new_##name.syms); \
+	keysyms_arr_keycodes(dpy, new_##name.syms, &new_##name.codes)
+	BUILD_KEYS(Up); BUILD_KEYS(Down); BUILD_KEYS(Left); BUILD_KEYS(Right);
+	BUILD_KEYS(Prev); BUILD_KEYS(Next); BUILD_KEYS(Cancel); BUILD_KEYS(Select);
+	BUILD_KEYS(Iconify); BUILD_KEYS(Shade); BUILD_KEYS(Close);
+#undef BUILD_KEYS
 
-	// convert the arrays of KeySyms into arrays of KeyCodes, for this specific Display
-	keysyms_arr_keycodes(dpy, mw->keysyms_Up, &mw->keycodes_Up);
-	keysyms_arr_keycodes(dpy, mw->keysyms_Down, &mw->keycodes_Down);
-	keysyms_arr_keycodes(dpy, mw->keysyms_Left, &mw->keycodes_Left);
-	keysyms_arr_keycodes(dpy, mw->keysyms_Right, &mw->keycodes_Right);
-	keysyms_arr_keycodes(dpy, mw->keysyms_Prev, &mw->keycodes_Prev);
-	keysyms_arr_keycodes(dpy, mw->keysyms_Next, &mw->keycodes_Next);
-	keysyms_arr_keycodes(dpy, mw->keysyms_Cancel, &mw->keycodes_Cancel);
-	keysyms_arr_keycodes(dpy, mw->keysyms_Select, &mw->keycodes_Select);
-	keysyms_arr_keycodes(dpy, mw->keysyms_Iconify, &mw->keycodes_Iconify);
-	keysyms_arr_keycodes(dpy, mw->keysyms_Shade, &mw->keycodes_Shade);
-	keysyms_arr_keycodes(dpy, mw->keysyms_Close, &mw->keycodes_Close);
+#define COMMIT_KEYS(name) do { \
+	free(mw->keysyms_##name); free(mw->keycodes_##name); \
+	mw->keysyms_##name = new_##name.syms; \
+	mw->keycodes_##name = new_##name.codes; \
+} while (0)
+	COMMIT_KEYS(Up); COMMIT_KEYS(Down); COMMIT_KEYS(Left); COMMIT_KEYS(Right);
+	COMMIT_KEYS(Prev); COMMIT_KEYS(Next); COMMIT_KEYS(Cancel); COMMIT_KEYS(Select);
+	COMMIT_KEYS(Iconify); COMMIT_KEYS(Shade); COMMIT_KEYS(Close);
+#undef COMMIT_KEYS
 
 	// we check all possible pairs, one pair at a time. This is in a specific order, to give a more helpful error msg
 	check_keybindings_conflict(ps->o.config_path, "keysUp", mw->keysyms_Up, "keysDown", mw->keysyms_Down);
@@ -176,7 +170,8 @@ mainwin_reload(session_t *ps, MainWin *mw) {
 	check_keybindings_conflict(ps->o.config_path, "keysNext", mw->keysyms_Next, "keysSelect", mw->keysyms_Select);
 	check_keybindings_conflict(ps->o.config_path, "keysCancel", mw->keysyms_Cancel, "keysSelect", mw->keysyms_Select);
 
-	mw->colormap = XCreateColormap(dpy, ps->root, mw->visual, AllocNone);
+	if (mw->colormap == None)
+		mw->colormap = XCreateColormap(dpy, ps->root, mw->visual, AllocNone);
 	mw->format = XRenderFindVisualFormat(dpy, mw->visual);
 
 	{
@@ -241,6 +236,7 @@ mainwin_create_pixmap(MainWin *mw) {
 	clear.alpha = alphaconv(ps->o.normal_opacity);
 	if(mw->normalPixmap != None)
 		XFreePixmap(ps->dpy, mw->normalPixmap);
+
 	mw->normalPixmap = XCreatePixmap(ps->dpy, mw->window, 1, 1, 8);
 	if(mw->normalPicture != None)
 		XRenderFreePicture(ps->dpy, mw->normalPicture);
@@ -456,8 +452,17 @@ mainwin_destroy(MainWin *mw) {
 	
 	if(mw->normalPixmap != None)
 		XFreePixmap(ps->dpy, mw->normalPixmap);
-	
+
+	if(mw->shadowPicture != None)
+		XRenderFreePicture(ps->dpy, mw->shadowPicture);
+
+	if(mw->shadowPixmap != None)
+		XFreePixmap(ps->dpy, mw->shadowPixmap);
+
 	XDestroyWindow(ps->dpy, mw->window);
+
+	if(mw->colormap != None)
+		XFreeColormap(ps->dpy, mw->colormap);
 	
 #ifdef CFG_XINERAMA
 	if(mw->xin_info)

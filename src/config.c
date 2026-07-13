@@ -69,19 +69,41 @@ static dlist *
 config_parse(const char *config) {
 	regex_t re_section, re_empty, re_entry;
 	regmatch_t matches[5];
-	char line[8192], *section = 0;
-	int ix = 0, l_ix = 0;
+	char *line = NULL, *section = NULL;
+	size_t line_len = 0, line_cap = 0;
 	dlist *new_config = 0;
-	
-	regcomp(&re_section, "^[[:space:]]*\\[[[:space:]]*([[:alnum:]]*?)[[:space:]]*\\][[:space:]]*$", REG_EXTENDED);
-	regcomp(&re_empty, "^[[:space:]]*#|^[[:space:]]*$", REG_EXTENDED);
-	regcomp(&re_entry, "^[[:space:]]*([[:alnum:]]+)[[:space:]]*=[[:space:]]*(.*?)[[:space:]]*$", REG_EXTENDED);
-	
-	while(1)
-	{
-		// strchr() considers '\0' at the end of the string as well
-		if (strchr("\n\r", config[ix])) {
-			line[l_ix] = 0;
+	bool section_re = false, empty_re = false, entry_re = false;
+	bool success = false;
+
+	if (regcomp(&re_section, "^[[:space:]]*\\[[[:space:]]*([[:alnum:]]*?)[[:space:]]*\\][[:space:]]*$", REG_EXTENDED)) {
+		printfef(true, "(): WARNING: Couldn't compile section parser.");
+		goto cleanup;
+	}
+	section_re = true;
+	if (regcomp(&re_empty, "^[[:space:]]*#|^[[:space:]]*$", REG_EXTENDED)) {
+		printfef(true, "(): WARNING: Couldn't compile empty-line parser.");
+		goto cleanup;
+	}
+	empty_re = true;
+	if (regcomp(&re_entry, "^[[:space:]]*([[:alnum:]]+)[[:space:]]*=[[:space:]]*(.*?)[[:space:]]*$", REG_EXTENDED)) {
+		printfef(true, "(): WARNING: Couldn't compile entry parser.");
+		goto cleanup;
+	}
+	entry_re = true;
+
+	for (size_t ix = 0;; ix++) {
+		char c = config[ix];
+		if (c == '\n' || c == '\r' || c == '\0') {
+			if (line_len == line_cap) {
+				if (line_cap == SIZE_MAX)
+					goto cleanup;
+				char *grown = realloc(line, line_cap + 1u);
+				if (!grown)
+					goto cleanup;
+				line = grown;
+				line_cap++;
+			}
+			line[line_len] = '\0';
 			if(regexec(&re_empty, line, 5, matches, 0) == 0) {
 				/* do nothing */
 			} else if(regexec(&re_section, line, 5, matches, 0) == 0) {
@@ -95,23 +117,37 @@ config_parse(const char *config) {
 			} else  {
 				printfef(true, "(): WARNING: Ignoring invalid line: %s\n", line);
 			}
-			l_ix = 0;
+			line_len = 0;
 		} else {
-			line[l_ix] = config[ix];
-			l_ix++;
+			if (line_len == line_cap) {
+				size_t next = line_cap ? line_cap * 2u : 256u;
+				if (next < line_cap || next == SIZE_MAX)
+					goto cleanup;
+				char *grown = realloc(line, next);
+				if (!grown)
+					goto cleanup;
+				line = grown;
+				line_cap = next;
+			}
+			line[line_len++] = c;
 		}
-		if (!config[ix])
+		if (!c)
 			break;
-		++ix;
 	}
-	
+	success = true;
+
+cleanup:
 	if(section)
 		free(section);
-	
-	regfree(&re_section);
-	regfree(&re_empty);
-	regfree(&re_entry);
-	
+	free(line);
+	if (entry_re) regfree(&re_entry);
+	if (empty_re) regfree(&re_empty);
+	if (section_re) regfree(&re_section);
+	if (!success) {
+		config_free(new_config);
+		new_config = NULL;
+	}
+
 	return new_config;
 }
 
@@ -123,21 +159,48 @@ config_load(const char *path)
 	char *data;
 	dlist *config;
 
-	fseek(fin, 0, SEEK_END);
+	if (!fin) {
+		printfef(true, "(): WARNING: Couldn't open config file '%s'.\n", path);
+		return NULL;
+	}
+	if (fseek(fin, 0, SEEK_END)) {
+		printfef(true, "(): WARNING: Couldn't seek config file '%s'.\n", path);
+		fclose(fin);
+		return NULL;
+	}
 	flen = ftell(fin);
-	
-	if(! flen)
+
+	if (flen < 0) {
+		printfef(true, "(): WARNING: Couldn't determine config file size '%s'.\n", path);
+		fclose(fin);
+		return NULL;
+	}
+	if(!flen)
 	{
 		printfef(true, "(): WARNING: '%s' is empty.\n", path);
 		fclose(fin);
 		return 0;
 	}
 	
-	fseek(fin, 0, SEEK_SET);
+	if (fseek(fin, 0, SEEK_SET)) {
+		printfef(true, "(): WARNING: Couldn't rewind config file '%s'.\n", path);
+		fclose(fin);
+		return NULL;
+	}
+	if ((unsigned long)flen > SIZE_MAX - 1u) {
+		printfef(true, "(): WARNING: Config file '%s' is too large.\n", path);
+		fclose(fin);
+		return NULL;
+	}
 	
-	data = allocchk(malloc(flen + 1));
-	data[flen] = '\0';
-	if(fread(data, 1, flen, fin) != flen)
+	size_t length = (size_t)flen;
+	data = malloc(length + 1u);
+	if (!data) {
+		fclose(fin);
+		return NULL;
+	}
+	data[length] = '\0';
+	if(fread(data, 1, length, fin) != length)
 	{
 		printfef(true, "(): WARNING: Couldn't read from config file '%s'.\n", path);
 		free(data);

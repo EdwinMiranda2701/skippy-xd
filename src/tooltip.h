@@ -33,14 +33,14 @@ struct _Tooltip {
 	int font_height;
 	
 	FcChar8 *text;
-	int text_len;
+	size_t text_len;
 };
 typedef struct _Tooltip Tooltip;
 
 Tooltip *tooltip_create(MainWin *mw);
 void tooltip_destroy(Tooltip *);
 void tooltip_map(Tooltip *tt, ClientWin *cw,
-		FcChar8 *text, int len);
+		const FcChar8 *text, size_t len);
 void tooltip_unmap(Tooltip *);
 void tooltip_draw(Tooltip *, bool);
 void tooltip_move(Tooltip *tt, ClientWin *cw);

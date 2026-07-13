@@ -305,7 +305,7 @@ typedef struct {
 	.filterxscreen = true, \
 	.wm_status_count = 0, \
 	.wm_status = NULL, \
-	.wm_status_str = "", \
+	.wm_status_str = NULL, \
 \
 	.switchLayout = LAYOUT_XD, \
 	.exposeLayout = LAYOUT_COSMOS, \
@@ -1357,6 +1357,8 @@ report_key_modifiers(XKeyEvent *evk)
 #include "focus.h"
 #include "config.h"
 #include "tooltip.h"
+#include "fifo.h"
+#include "parse.h"
 #include "img-xlib.h"
 #ifdef CFG_LIBPNG
 // FreeType uses setjmp.h and libpng-1.2 feels crazy about this...

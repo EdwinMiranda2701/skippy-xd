@@ -174,25 +174,30 @@ tooltip_create(MainWin *mw) {
 }
 
 void
-tooltip_map(Tooltip *tt, ClientWin *cw, FcChar8 *text, int len)
+tooltip_map(Tooltip *tt, ClientWin *cw, const FcChar8 *text, size_t len)
 {
 	session_t * const ps = tt->mainwin->ps;
 	unsigned int max_width = cw->mini.width * ps->o.tooltip_width;
 	FcChar8 *ptr;
+	if (!text || len > INT_MAX)
+		return;
+	FcChar8 *copy = allocchk(malloc(len + 1u));
+	memcpy(copy, text, len);
+	copy[len] = '\0';
 
 	//if (tt->window)
 		//XUnmapWindow(ps->dpy, tt->window);
 	
-	XftTextExtentsUtf8(ps->dpy, tt->font, text, len, &tt->extents);
+	XftTextExtentsUtf8(ps->dpy, tt->font, copy, (int)len, &tt->extents);
 	
 	while (tt->extents.width > max_width && len > 3) {
-		ptr = text + len - 1;
+		ptr = copy + len - 1;
 		*ptr-- = '\0';
 		*ptr-- = '.';
 		*ptr-- = '.';
 		*ptr-- = '.';
 		len--;
-		XftTextExtentsUtf8(ps->dpy, tt->font, text, len, &tt->extents);
+		XftTextExtentsUtf8(ps->dpy, tt->font, copy, (int)len, &tt->extents);
 	}
 
 	tt->width = tt->extents.width + 8;
@@ -200,12 +205,8 @@ tooltip_map(Tooltip *tt, ClientWin *cw, FcChar8 *text, int len)
 	XResizeWindow(ps->dpy, tt->window, tt->width, tt->height);
 	tooltip_move(tt, cw);
 	
-	if(tt->text)
-		free(tt->text);
-	
-	tt->text = (FcChar8 *)malloc(len);
-	memcpy(tt->text, text, len);
-	
+	free(tt->text);
+	tt->text = copy;
 	tt->text_len = len;
 	
 	XMapWindow(ps->dpy, tt->window);
@@ -264,12 +265,12 @@ tooltip_draw(Tooltip *tt, bool focused)
 					continue;
 				XftDrawStringUtf8(tt->draw, &tt->outline, tt->font,
 						base_x + dx, base_y + dy,
-						tt->text, tt->text_len);
+						tt->text, (int)tt->text_len);
 			}
 		}
 	}
 
 	XftDrawStringUtf8(tt->draw, &tt->color, tt->font,
 			base_x, base_y,
-			tt->text, tt->text_len);
+			tt->text, (int)tt->text_len);
 }

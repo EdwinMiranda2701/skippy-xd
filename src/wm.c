@@ -240,7 +240,7 @@ match_expr(const char *expr, const char *text) {
 	return eval(expr, text, NULL);
 }
 
-int wm_get_status(char *status) {
+int wm_get_status(const char *status) {
 	if (strcmp(status, "sticky") == 0) {
 		return WIN_STATE_STICKY;
 	}
@@ -649,7 +649,7 @@ wm_get_window_title(session_t *ps, Window wid, int *length_return) {
 
 FcChar8 *
 wm_get_desktop_name(session_t *ps, int desktop) {
-	unsigned char *dup, *buffer = NULL, *data = NULL;
+	unsigned char *buffer = NULL;
 	int real_format = 0;
 	Atom real_type = None;
 	unsigned long items_read = 0, items_left = 0;
@@ -657,21 +657,18 @@ wm_get_desktop_name(session_t *ps, int desktop) {
 			_NET_DESKTOP_NAMES, 0L, 8192L, False, AnyPropertyType, &real_type, &real_format,
 			&items_read, &items_left, &buffer);
 
-	data = buffer;
-	if (Success == status && buffer != NULL) {
-		for (int i=0; i<desktop; i++) {
-			data = (unsigned char *) strchr((char *)data, '\0');
-			data++;
-		}
-		dup = malloc(strlen((char *) data) + 1);
-		strcpy((char *) dup, (char *) data);
-	} else {
-		dup = malloc(snprintf(NULL, 0, "%i", desktop) + 1);
-		sprintf((char *)dup, "%i", desktop);
+	char *dup = NULL;
+	if (desktop >= 0 && Success == status && buffer && real_format == 8)
+		dup = desktop_name_at(buffer, items_read, (unsigned int)desktop);
+	if (!dup) {
+		char fallback[32];
+		int len = snprintf(fallback, sizeof(fallback), "%i", desktop);
+		if (len > 0)
+			dup = strndup(fallback, (size_t)len);
 	}
 
-	XFree(buffer);
-	return dup;
+	sxfree(buffer);
+	return (FcChar8 *)dup;
 }
 
 void
@@ -1164,4 +1161,3 @@ wid_get_prop_adv(const session_t *ps, Window w, Atom atom, long offset,
     .format = 0
   };
 }
-

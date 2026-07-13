@@ -19,10 +19,12 @@ skippy_sources = [
   'src/config.c',
   'src/dlist.c',
   'src/focus.c',
+  'src/fifo.c',
   'src/img-xlib.c',
   'src/img.c',
   'src/layout.c',
   'src/mainwin.c',
+  'src/parse.c',
   'src/skippy.c',
   'src/tooltip.c',
   'src/wm.c',
@@ -100,6 +102,32 @@ executable(
   c_args: [ '-DSKIPPYXD_VERSION="' + meson.project_version() + '"' ],
   install: true,
 )
+
+core_tests = executable(
+  'test-core',
+  sources: [
+    'tests/test_core.c',
+    'src/fifo.c',
+    'src/parse.c',
+  ],
+  include_directories: include_directories('.'),
+  c_args: ['-UNDEBUG'],
+)
+test('core', core_tests)
+
+config_tests = executable(
+  'test-config',
+  sources: [
+    'tests/test_config.c',
+    'src/config.c',
+    'src/dlist.c',
+  ],
+  include_directories: include_directories('.'),
+  dependencies: [x11_dep, xcomposite_dep, xdamage_dep, xext_dep,
+                 xfixes_dep, xft_dep, xrender_dep],
+  c_args: ['-UNDEBUG'],
+)
+test('config', config_tests)
 
 install_data(
   sources: ['skippy-xd.rc'],
