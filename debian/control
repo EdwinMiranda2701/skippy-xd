@@ -4,6 +4,9 @@ Priority: optional
 Maintainer: musqz <musqz@github>
 Build-Depends:
  debhelper (>= 13),
+ meson,
+ ninja-build,
+ pkg-config,
  libx11-dev,
  libxft-dev,
  libxrender-dev,

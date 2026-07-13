@@ -28,6 +28,7 @@ depends=(
 )
 makedepends=(
   git
+  meson
 )
 
 if [ "${_build_git::1}" != "t" ] ; then
@@ -56,10 +57,11 @@ fi
 
 build() {
   cd "$_pkgsrc"
-  make PREFIX=/usr
+  meson setup build --prefix=/usr --buildtype=release
+  meson compile -C build
 }
 
 package() {
   cd "$_pkgsrc"
-  make DESTDIR="$pkgdir" install
+  meson install -C build --destdir "$pkgdir"
 }

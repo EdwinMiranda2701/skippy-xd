@@ -33,14 +33,20 @@ Installation and usage is simple:
 ```
 git clone https://github.com/felixfung/skippy-xd.git
 cd skippy-xd
-make
-make install
+meson setup build
+meson compile -C build
+sudo meson install -C build
 
 skippy-xd --start-daemon
 skippy-xd --switch --next
 skippy-xd --expose
 skippy-xd --paging
 ```
+
+The default installation prefix is `/usr`, placing the executable in
+`/usr/bin`, the man page in `/usr/share/man/man1`, and the system-wide
+configuration in `/etc/xdg/skippy-xd.rc`. Pass Meson options such as
+`--prefix` to `meson setup` to customize the installation.
 
 Or better, find and try out the package on your distro.
 

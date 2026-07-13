@@ -29,7 +29,6 @@ callgrind.out.*
 man/*.html
 man/*.1
 doxygen/
-.clang_complete
 /src/backtrace-symbols.[ch]
 
 # User config override

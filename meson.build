@@ -32,7 +32,7 @@ skippy_sources = [
 cc = meson.get_compiler('c')
 m_dep = cc.find_library('m')
 
-# Keep optimized builds consistent with the Makefile's default release build.
+# Fortify optimized release builds.
 if get_option('optimization') not in ['0', 'plain']
   add_project_arguments('-D_FORTIFY_SOURCE=2', language: 'c')
 endif
