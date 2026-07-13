@@ -1,6 +1,17 @@
 project(
   'skippy-xd', 'c',
   version: files('version.txt'),
+  meson_version: '>= 1.1.0',
+  default_options: [
+    'b_asneeded=true',
+    'b_ndebug=if-release',
+    'buildtype=release',
+    'c_std=c99',
+    'optimization=2',
+    'prefix=/usr',
+    'sysconfdir=/etc',
+    'warning_level=1',
+  ],
 )
 
 skippy_sources = [
@@ -20,6 +31,21 @@ skippy_sources = [
 # dependencies
 cc = meson.get_compiler('c')
 m_dep = cc.find_library('m')
+
+# Keep optimized builds consistent with the Makefile's default release build.
+if get_option('optimization') not in ['0', 'plain']
+  add_project_arguments('-D_FORTIFY_SOURCE=2', language: 'c')
+endif
+add_project_link_arguments(
+  cc.get_supported_link_arguments('-Wl,-O1'),
+  language: 'c',
+)
+
+if cc.get_id() == 'clang'
+  add_project_arguments('-Wno-unused-function', language: 'c')
+elif cc.get_id() == 'gcc'
+  add_project_arguments('-Wno-unused-but-set-variable', language: 'c')
+endif
 
 x11_dep = dependency('x11')
 xcomposite_dep = dependency('xcomposite')

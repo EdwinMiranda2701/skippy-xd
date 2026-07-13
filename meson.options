@@ -1,4 +1,4 @@
-option('skippy_gif', type: 'feature', value: 'auto')
-option('skippy_jpeg', type: 'feature', value: 'auto')
-option('skippy_png', type: 'feature', value: 'auto')
-option('skippy_xinerama', type: 'feature', value: 'auto')
+option('skippy_gif', type: 'feature', value: 'enabled', description: 'Enable GIF image support')
+option('skippy_jpeg', type: 'feature', value: 'enabled', description: 'Enable JPEG image support')
+option('skippy_png', type: 'feature', value: 'enabled', description: 'Enable PNG image support')
+option('skippy_xinerama', type: 'feature', value: 'enabled', description: 'Enable Xinerama support')
