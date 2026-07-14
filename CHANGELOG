@@ -1,6 +1,9 @@
 Skippy-XD changelog
 
 0.10.9 -- "Correctness Cascade" (14 Jul 2026) ~/edwin
+ - Make Meson the default build system and align its feature defaults with the
+   previous Make build
+ - Add regression coverage for parsing, FIFO commands, and configuration
  - Fix startup draining of nonblocking FIFOs
  - Correct class/title filtering and release filter-owned strings
  - Correct client pixmap and picture lifecycle handling
@@ -163,16 +166,16 @@ Skippy-XD changelog
    startup then quits, instead of waiting to be activated).
  - Updated config loading code (and sample config file) accordingly.
  - Skippy config is now loaded from ~/.config/skippy-xd/skippy-xd.rc
- - Did some code cleanup (following the boy-scout rule, and just helping 
+ - Did some code cleanup (following the boy-scout rule, and just helping
    myself to grok it).
- - Rework triggering code so that activation can be triggered by command 
+ - Rework triggering code so that activation can be triggered by command
    rather than just a hotkey. Better to use DE's global hotkeys.
  - Add command-line targets for named-pipe based ipc.
    Start Daemon: skippy-xd --start-daemon
    Stop Daemon: skippy-xd --stop-daemon (daemon must be running)
    Activate Window Picker: skippy-xd --activate-window-picker (daemon must be
    running)
- - If skippy-xd is run with no arguments, the window picker is activated once, 
+ - If skippy-xd is run with no arguments, the window picker is activated once,
    then the program closes.
 
 0.5.0 -- "Damage, Inc." (19 May 2004)
