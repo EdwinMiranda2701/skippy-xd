@@ -313,12 +313,18 @@ clientwin_update2_desktop(session_t *ps, MainWin *mw, ClientWin *cw) {
 
 static inline bool
 clientwin_update2_filled(session_t *ps, MainWin *mw, ClientWin *cw) {
+	float scale = cw->paneltype == WINTYPE_WINDOW ? mw->multiplier : 1.0f;
+	int width = cw->mini.width > 0 ? cw->mini.width : (int)ceilf(cw->src.width * scale);
+	int height = cw->mini.height > 0 ? cw->mini.height : (int)ceilf(cw->src.height * scale);
+	width = MAX(width, 1);
+	height = MAX(height, 1);
+
 	if (cw->pict_filled)
 		free_pictw(ps, &cw->pict_filled);
 	cw->pict_filled = simg_postprocess(ps,
 			clone_pictw(ps, ps->o.fillSpec.img),
 			ps->o.fillSpec.mode,
-			cw->mini.width, cw->mini.height,
+			width, height,
 			ps->o.fillSpec.alg, ps->o.fillSpec.valg,
 			&ps->o.fillSpec.c);
 	return cw->pict_filled;
@@ -326,13 +332,19 @@ clientwin_update2_filled(session_t *ps, MainWin *mw, ClientWin *cw) {
 
 static inline bool
 clientwin_update2_icon(session_t *ps, MainWin *mw, ClientWin *cw) {
+	float scale = cw->paneltype == WINTYPE_WINDOW ? mw->multiplier : 1.0f;
+	int width = cw->mini.width > 0 ? cw->mini.width : (int)ceilf(cw->src.width * scale);
+	int height = cw->mini.height > 0 ? cw->mini.height : (int)ceilf(cw->src.height * scale);
+	width = MAX(width, 1);
+	height = MAX(height, 1);
+
 	if (cw->icon_pict_filled)
 		free_pictw(ps, &cw->icon_pict_filled);
 
 	cw->icon_pict_filled = simg_postprocess(ps,
 			clone_pictw(ps, cw->icon_pict_filler),
 			ps->o.iconFillSpec.mode,
-			cw->mini.width, cw->mini.height,
+			width, height,
 			ps->o.iconFillSpec.alg, ps->o.iconFillSpec.valg,
 			&ps->o.iconFillSpec.c);
 	return cw->icon_pict_filled;
@@ -373,11 +385,13 @@ clientwin_destroy(ClientWin *cw, bool destroyed) {
 	MainWin *mw = cw->mainwin;
 	session_t * const ps = mw->ps;
 
-	if (ps->o.pseudoTrans)
+	if (ps->o.pseudoTrans || cw->mode != CLIDISP_DESKTOP)
 		free_picture(ps, &cw->origin);
 	free_picture(ps, &cw->destination);
 	free_picture(ps, &cw->shadow);
 	free_pixmap(ps, &cw->pixmap);
+	cw->pixmap_width = 0;
+	cw->pixmap_height = 0;
 	free_pixmap(ps, &cw->cpixmap);
 	free_pictw(ps, &cw->icon_pict);
 	free_pictw(ps, &cw->icon_pict_filler);
@@ -664,19 +678,32 @@ void clientwin_round_corners(ClientWin *cw) {
 
 void clientwin_prepmove(ClientWin *cw)
 {
-	if (cw->pixmap)
-		XFreePixmap(cw->mainwin->ps->dpy, cw->pixmap);
+	MainWin *mw = cw->mainwin;
+	session_t *ps = mw->ps;
+	float scale = cw->paneltype == WINTYPE_WINDOW ? mw->multiplier : 1.0f;
+	int width = MAX(cw->src.width, (int)ceilf(cw->src.width * scale));
+	int height = MAX(cw->src.height, (int)ceilf(cw->src.height * scale));
+	if (width <= 0 || height <= 0)
+		return;
 
-	if (cw->destination)
-		XRenderFreePicture(cw->mainwin->ps->dpy, cw->destination);
+	if (cw->pixmap && cw->destination &&
+			cw->pixmap_width == width && cw->pixmap_height == height)
+		return;
 
-	cw->pixmap = XCreatePixmap(cw->mainwin->ps->dpy, cw->mini.window,
-			cw->src.width, cw->src.height, cw->mainwin->depth);
-	XSetWindowBackgroundPixmap(cw->mainwin->ps->dpy,
+	free_picture(ps, &cw->destination);
+	free_pixmap(ps, &cw->pixmap);
+	cw->pixmap_width = 0;
+	cw->pixmap_height = 0;
+
+	cw->pixmap = XCreatePixmap(ps->dpy, cw->mini.window,
+			width, height, mw->depth);
+	XSetWindowBackgroundPixmap(ps->dpy,
 			cw->mini.window, cw->pixmap);
 
-	cw->destination = XRenderCreatePicture(cw->mainwin->ps->dpy,
+	cw->destination = XRenderCreatePicture(ps->dpy,
 			cw->pixmap, cw->mini.format, 0, 0);
+	cw->pixmap_width = width;
+	cw->pixmap_height = height;
 }
 
 void
@@ -741,6 +768,8 @@ clientwin_unmap(ClientWin *cw) {
 	free_damage(ps, &cw->damage);
 	free_picture(ps, &cw->destination);
 	free_pixmap(ps, &cw->pixmap);
+	cw->pixmap_width = 0;
+	cw->pixmap_height = 0;
 
 	XUnmapWindow(ps->dpy, cw->mini.window);
 	XSetWindowBackgroundPixmap(ps->dpy, cw->mini.window, None);

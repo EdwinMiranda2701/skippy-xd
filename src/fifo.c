@@ -1,8 +1,30 @@
 #include "fifo.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+
+bool
+fifo_drain_fd(int fd) {
+	if (fd < 0) {
+		errno = EBADF;
+		return false;
+	}
+
+	uint8_t buffer[1024];
+	for (;;) {
+		ssize_t ret = read(fd, buffer, sizeof(buffer));
+		if (ret > 0)
+			continue;
+		if (ret == 0 || errno == EAGAIN || errno == EWOULDBLOCK)
+			return true;
+		if (errno == EINTR)
+			continue;
+		return false;
+	}
+}
 
 bool
 fifo_encode_command(pid_t pid, const uint8_t *payload, size_t payload_len,

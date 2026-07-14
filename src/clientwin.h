@@ -47,6 +47,7 @@ struct _clientwin_t {
 	SkippyWindow mini;
 
 	Pixmap pixmap;
+	int pixmap_width, pixmap_height;
 	Picture origin, destination, shadow;
 	Damage damage;
 	float factor;
@@ -69,6 +70,8 @@ struct _clientwin_t {
 #define CLIENTWT_INIT { \
 	.src = SKIPPYWINT_INIT, \
 	.mini = SKIPPYWINT_INIT, \
+	.pixmap_width = 0, \
+	.pixmap_height = 0, \
 	.mainwin = NULL \
 }
 

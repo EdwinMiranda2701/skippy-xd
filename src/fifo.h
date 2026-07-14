@@ -23,6 +23,8 @@ typedef struct {
 	size_t frame_len;
 } fifo_frame_t;
 
+bool fifo_drain_fd(int fd);
+
 bool fifo_encode_command(pid_t pid, const uint8_t *payload, size_t payload_len,
 		uint8_t *output, size_t capacity, size_t *output_len);
 

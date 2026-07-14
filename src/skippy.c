@@ -961,7 +961,7 @@ calculatePanelBorders(MainWin *mw,
 		// assumed horizontal panel
 		if (cw->src.width >= cw->src.height) {
 			// assumed top panel
-			if (cw->src.y < mw->y + mw->height / 2.0) {
+			if (cw->src.y < mw->height / 2.0) {
 				*y1 = MAX(*y1, cw->src.y + cw->src.height);
 			}
 			// assumed bottom panel
@@ -972,7 +972,7 @@ calculatePanelBorders(MainWin *mw,
 		// assumed vertical panel
 		else {
 			// assumed left panel
-			if (cw->src.x < mw->x + mw->width / 2.0) {
+			if (cw->src.x < mw->width / 2.0) {
 				*x1 = MAX(*x1, cw->src.x + cw->src.width);
 			}
 			// assumed right panel
@@ -1037,9 +1037,9 @@ struct mon_layout {
 static void
 init_layout_all_monitors(MainWin *mw, enum layoutmode layout, Window leader)
 {
+#ifdef CFG_XINERAMA
 	session_t *ps = mw->ps;
 
-#ifdef CFG_XINERAMA
 	if (!mw->xin_info || mw->xin_screens <= 0) {
 		init_layout(mw, layout, leader);
 		return;
@@ -1331,6 +1331,8 @@ desktopwin_map(ClientWin *cw)
 
 	free_damage(ps, &cw->damage);
 	free_pixmap(ps, &cw->pixmap);
+	cw->pixmap_width = 0;
+	cw->pixmap_height = 0;
 
 	if (ps->o.pseudoTrans)
 		XUnmapWindow(ps->dpy, cw->mini.window);
@@ -1378,8 +1380,9 @@ skippy_activate(MainWin *mw, enum layoutmode layout, Window leader)
 	foreach_dlist(mw->clients) {
 		ClientWin *cw = iter->data;
 		clientwin_update3(cw);
-		clientwin_update2(cw);
 		cw->paneltype = wm_identify_panel(mw->ps, cw->wid_client);
+		if (cw->paneltype != WINTYPE_WINDOW)
+			clientwin_update2(cw);
 	}
 
 	if (layout == LAYOUTMODE_PAGING)
@@ -1395,6 +1398,7 @@ skippy_activate(MainWin *mw, enum layoutmode layout, Window leader)
 		cw->src.y -= mw->y;
 		cw->x *= mw->multiplier;
 		cw->y *= mw->multiplier;
+		clientwin_update2(cw);
 	}
 
 	foreach_dlist(mw->panels) {
@@ -1455,8 +1459,11 @@ mainloop(session_t *ps, bool activate_on_start) {
 	count_and_filter_clients(ps->mainwin);
 
 	foreach_dlist(ps->mainwin->clients) {
-		clientwin_update3((ClientWin *) iter->data);
-		clientwin_update2((ClientWin *) iter->data);
+		ClientWin *cw = (ClientWin *)iter->data;
+		clientwin_update3(cw);
+		cw->paneltype = wm_identify_panel(ps, cw->wid_client);
+		if (cw->paneltype != WINTYPE_WINDOW)
+			clientwin_update2(cw);
 	}
 
 	while (true) {
@@ -1833,16 +1840,34 @@ mainloop(session_t *ps, bool activate_on_start) {
 			else if (!mw && (ev.type == ConfigureNotify || ev.type == PropertyNotify)) {
 				printfdf(false,
 						"(): else if (ev.type == ConfigureNotify || ev.type == PropertyNotify) {");
-				dlist *iter = (wid ? dlist_find(ps->mainwin->clients, clientwin_cmp_func, (void *) wid): NULL);
+				Window event_wid = wid;
+				bool property_changed = ev.type == PropertyNotify;
+				num_events--;
+				while (num_events > 0) {
+					XEvent ev_next = { };
+					XPeekEvent(ps->dpy, &ev_next);
+					if ((ev_next.type != ConfigureNotify &&
+							ev_next.type != PropertyNotify) ||
+							ev_window(ps, &ev_next) != event_wid)
+						break;
+					XNextEvent(ps->dpy, &ev);
+					property_changed |= ev.type == PropertyNotify;
+					num_events--;
+				}
+
+				dlist *iter = (event_wid ? dlist_find(ps->mainwin->clients,
+						clientwin_cmp_func, (void *)event_wid) : NULL);
 				ClientWin *cw = NULL;
 				if (iter)
 					cw = (ClientWin *) iter->data;
 				if (cw) {
 					clientwin_update(cw);
-					clientwin_update3(cw);
-					clientwin_update2(cw);
+					if (property_changed) {
+						clientwin_update3(cw);
+						clientwin_update2(cw);
+					}
 				}
-            }
+			}
 			else if (ev.type == CreateNotify || ev.type == MapNotify) {
 				printfdf(false, "(): else if (ev.type == CreateNotify || ev.type == MapNotify) {");
 				count_and_filter_clients(ps->mainwin);
@@ -3312,12 +3337,13 @@ int main(int argc, char *argv[]) {
 		}
 		assert(ps->fd_pipe >= 0);
 
-		{
-			char *buf[BUF_LEN];
-			while (read(ps->fd_pipe, buf, sizeof(buf)))
-				continue;
-			printfdf(false, "(): Finished flushing pipe \"%s\".", pipePath);
+		if (!fifo_drain_fd(ps->fd_pipe)) {
+			int drain_errno = errno;
+			printfef(true, "(): Failed flushing pipe \"%s\": %s",
+					pipePath, strerror(drain_errno));
 		}
+		else
+			printfdf(false, "(): Finished flushing pipe \"%s\".", pipePath);
 
 		flush_clients(ps);
 

@@ -879,22 +879,34 @@ wm_validate_window(session_t *ps, Window wid) {
 
 	if (ps->o.wm_class) {
 		XClassHint *hints = allocchk(XAllocClassHint());
-		if (hints){
-			XGetClassHint(ps->dpy, wid, hints);
-			bool regmatch_class = match_expr(ps->o.wm_class, hints->res_class);
-			bool regmatch_name = match_expr(ps->o.wm_class, hints->res_class);
+		bool matched = false;
+		if (hints) {
+			hints->res_name = NULL;
+			hints->res_class = NULL;
+			if (XGetClassHint(ps->dpy, wid, hints)) {
+				bool regmatch_class = hints->res_class &&
+						match_expr(ps->o.wm_class, hints->res_class);
+				bool regmatch_name = hints->res_name &&
+						match_expr(ps->o.wm_class, hints->res_name);
+				matched = regmatch_class || regmatch_name;
+			}
 
-			if (!regmatch_class && !regmatch_name)
-				return false;
-			XFree(hints->res_name);
-			XFree(hints->res_class);
+			if (hints->res_name)
+				XFree(hints->res_name);
+			if (hints->res_class)
+				XFree(hints->res_class);
 			XFree(hints);
 		}
+		if (!matched)
+			return false;
 	}
 
 	if (ps->o.wm_title) {
 		FcChar8 *win_title = wm_get_window_title(ps, wid, NULL);
-		if (!match_expr(ps->o.wm_title, (char *) win_title))
+		bool matched = win_title &&
+				match_expr(ps->o.wm_title, (char *)win_title);
+		free(win_title);
+		if (!matched)
 			return false;
 	}
 

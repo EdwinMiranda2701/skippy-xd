@@ -2,8 +2,10 @@
 #include "src/parse.h"
 
 #include <assert.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int
 lookup_status(const char *status) {
@@ -100,9 +102,28 @@ test_fifo(void) {
 	assert(decoded.pid == 8 && decoded.payload[0] == 0xff);
 }
 
+static void
+test_fifo_drain(void) {
+	int fds[2];
+	assert(pipe(fds) == 0);
+	int flags = fcntl(fds[0], F_GETFL);
+	assert(flags >= 0);
+	assert(fcntl(fds[0], F_SETFL, flags | O_NONBLOCK) == 0);
+
+	static const char data[] = "pending FIFO data";
+	assert(write(fds[1], data, sizeof(data)) == (ssize_t)sizeof(data));
+	assert(fifo_drain_fd(fds[0]));
+	assert(fifo_drain_fd(fds[0]));
+	assert(close(fds[1]) == 0);
+	assert(fifo_drain_fd(fds[0]));
+	assert(close(fds[0]) == 0);
+	assert(!fifo_drain_fd(-1));
+}
+
 int main(void) {
 	test_statuses();
 	test_desktops();
 	test_fifo();
+	test_fifo_drain();
 	return 0;
 }

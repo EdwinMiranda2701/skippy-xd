@@ -1,5 +1,12 @@
 Skippy-XD changelog
 
+Unreleased
+ - Fix startup draining of nonblocking FIFOs
+ - Correct class/title filtering and release filter-owned strings
+ - Correct client pixmap and picture lifecycle handling
+ - Correct panel reserves on secondary monitors
+ - Reduce redundant configure/property event processing
+
 0.10.8 -- "Sigma Stack" (24 Apr 2026) ~/edwin
  - Add --creation-order: order windows by creation time instead of the WM's
    stacking order. Default reverts to stacking order (most-recent-use), as
