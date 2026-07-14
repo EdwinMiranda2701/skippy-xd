@@ -1,6 +1,6 @@
 Skippy-XD changelog
 
-Unreleased
+0.10.9 -- "Correctness Cascade" (14 Jul 2026) ~/edwin
  - Fix startup draining of nonblocking FIFOs
  - Correct class/title filtering and release filter-owned strings
  - Correct client pixmap and picture lifecycle handling
